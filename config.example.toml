@@ -51,6 +51,9 @@ project_lock_timeout_minutes = 60
 keep_staging_on_failure = true
 keep_success_staging = false
 
+# Optional fallback shown in Telegram Fast Deploy.
+# User-managed presets are stored at app.data_dir/fast_deploy_presets.json
+# and do not require service restart.
 [quick_deploy]
 enabled = true
 project = "webpos"

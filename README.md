@@ -35,6 +35,7 @@ Key settings:
 - `[telegram].allowed_chat_ids` — list of chat IDs allowed to use the bot
 - `[[users]]` — define users with their Telegram user ID
 - `[roles.*]` — define permissions per role
+- `[quick_deploy]` — optional default Fast Deploy fallback; runtime presets are managed from Telegram
 - `[[environments]]` — define environments (staging, production, etc.)
 - `[[repositories]]` — define repo URLs and branch rules
 - `[[projects]]` — define buildable projects inside repositories
@@ -71,6 +72,7 @@ Alternatively, send `/whoami` to see your current user info and permissions.
 [roles.*]                # Permission sets per role
 [tools]                  # Paths to git, msbuild, robocopy, 7z, appcmd
 [defaults]               # Timeouts, limits
+[quick_deploy]           # Optional default Fast Deploy fallback
 [[environments]]         # Environment definitions (key, name, double_confirm)
 [[repositories]]         # Repo URLs and branch config/patterns
 [[projects]]             # Project build settings inside repositories
@@ -92,6 +94,19 @@ Alternatively, send `/whoami` to see your current user info and permissions.
 - **Build Only** action requires `can_build`.
 - **Backup + Deploy IIS** to staging requires `can_deploy_staging`.
 - **Backup + Deploy IIS** to production requires `can_deploy_production`.
+
+## Fast Deploy Presets
+
+Fast Deploy can be managed from Telegram without editing `config.toml` or restarting the service.
+
+- Use `/fast` or the `⚡ Fast deploy` button in `/deploy`.
+- Each Telegram user can create multiple presets.
+- A preset stores name, project, environment, branch, and action.
+- Presets can be run, edited, or deleted from Telegram.
+- Presets are saved at `app.data_dir/fast_deploy_presets.json`.
+- The optional `[quick_deploy]` config is only a default fallback shown when enabled.
+
+Running a preset still goes through the normal confirmation screen. Production environments still require double confirmation.
 
 ## Branch Validation
 
@@ -162,9 +177,10 @@ src/
 ├── commands.rs  # Command handlers, callback handlers, branch validation
 ├── menu.rs      # Inline keyboard builders
 ├── session.rs   # Session state machine
+├── fast_preset.rs # Telegram-managed Fast Deploy presets
 ├── config.rs    # Config loading & validation
 ├── auth.rs      # Authentication & permission checks
-├── git.rs       # Git clone / commit resolve
+├── git.rs       # Git mirror cache / worktree checkout
 ├── msbuild.rs   # MSBuild FileSystem publish
 ├── deploy.rs    # Robocopy overlay deploy
 ├── iis.rs       # IIS app pool recycle
