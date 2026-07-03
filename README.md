@@ -116,8 +116,8 @@ Manual branch input is validated against these rules:
 
 ## Deploy Flow
 
-1. Create a job workspace under `workspace_root/jobs/{job_id}`.
-2. Clone the selected repository branch into `{repo-key}-repo`.
+1. Keep a persistent bare mirror cache under `workspace_root/repos/{repo-key}.git`.
+2. Fetch `origin` before each job and create a fresh detached worktree under `workspace_root/jobs/{job_id}/{repo-key}-worktree`.
 3. Publish the selected project with MSBuild into `{project-key}-build`.
 4. Delete configured `delete_from_build` entries from the build output.
 5. For deploy actions, zip the current IIS directory to `backup_root/{environment}/yyyy-MM-dd/{project}-HH-MM-SS.zip`.

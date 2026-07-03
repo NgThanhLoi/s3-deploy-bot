@@ -88,7 +88,8 @@ async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> 
         })?;
 
     let job_dir = job_dir(&state.config.app.workspace_root, &job.job_id);
-    let repo_dir = job_dir.join(format!("{}-repo", repo.key));
+    let mirror_dir = mirror_dir(&state.config.app.workspace_root, &repo.key);
+    let repo_dir = job_dir.join(format!("{}-worktree", repo.key));
     let build_dir = job_dir.join(format!("{}-build", project.key));
 
     update_stage(
@@ -101,8 +102,21 @@ async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> 
     .await;
     reset_dir(&job_dir)?;
 
-    update_stage(job, bot, state, "git_clone", "Cloning repository").await;
-    let commit = git::clone_branch(&state.config.tools, &repo, &job.branch, &repo_dir)?;
+    update_stage(
+        job,
+        bot,
+        state,
+        "git_checkout",
+        "Fetching repository cache and creating fresh worktree",
+    )
+    .await;
+    let commit = git::checkout_fresh_worktree(
+        &state.config.tools,
+        &repo,
+        &job.branch,
+        &mirror_dir,
+        &repo_dir,
+    )?;
     job.commit_hash = Some(commit.clone());
     push_log(job, format!("Resolved commit {}", commit));
     state.job_store.update(job.clone()).await;
@@ -157,7 +171,7 @@ async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> 
             "Cleaning job workspace",
         )
         .await;
-        cleanup_job_dir(&job_dir)?;
+        cleanup_job_workspace(&state.config.tools, &mirror_dir, &repo_dir, &job_dir)?;
         return Ok(());
     }
 
@@ -204,7 +218,7 @@ async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> 
         "Cleaning job workspace",
     )
     .await;
-    cleanup_job_dir(&job_dir)?;
+    cleanup_job_workspace(&state.config.tools, &mirror_dir, &repo_dir, &job_dir)?;
     Ok(())
 }
 
@@ -283,6 +297,12 @@ async fn cleanup_after_failure(job: &Job, state: &AppState) {
     }
 }
 
+fn mirror_dir(workspace_root: &Path, repo_key: &str) -> PathBuf {
+    workspace_root
+        .join("repos")
+        .join(format!("{}.git", repo_key))
+}
+
 fn job_dir(workspace_root: &Path, job_id: &str) -> PathBuf {
     workspace_root.join("jobs").join(job_id)
 }
@@ -303,6 +323,18 @@ fn cleanup_job_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to remove job directory '{}'", path.display()))?;
     }
     Ok(())
+}
+
+fn cleanup_job_workspace(
+    tools: &crate::config::ToolConfig,
+    mirror_dir: &Path,
+    worktree_dir: &Path,
+    job_dir: &Path,
+) -> Result<()> {
+    if mirror_dir.exists() {
+        git::remove_worktree(tools, mirror_dir, worktree_dir)?;
+    }
+    cleanup_job_dir(job_dir)
 }
 
 fn push_log(job: &mut Job, line: impl AsRef<str>) {
