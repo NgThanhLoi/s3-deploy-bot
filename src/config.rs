@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub timezone: String,
     pub data_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,17 +65,15 @@ pub struct DefaultsConfig {
 pub struct EnvironmentConfig {
     pub key: String,
     pub name: String,
+    #[serde(default)]
     pub requires_double_confirm: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ProjectConfig {
+pub struct RepositoryConfig {
     pub key: String,
     pub name: String,
     pub repo_url: String,
-    pub workspace: PathBuf,
-    pub project_file: PathBuf,
-    pub configuration: String,
     pub main_branch: String,
     #[serde(default)]
     pub quick_branches: Vec<String>,
@@ -84,10 +83,21 @@ pub struct ProjectConfig {
     pub manual_branch_patterns: Vec<String>,
     #[serde(default)]
     pub forbidden_branch_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectConfig {
+    pub key: String,
+    pub name: String,
+    pub repository: String,
+    pub project_file: PathBuf,
+    pub configuration: String,
     #[serde(default)]
-    pub delete_from_staging: Vec<String>,
+    pub precompile_before_publish: bool,
+    #[serde(default = "default_true")]
+    pub enable_updateable: bool,
     #[serde(default)]
-    pub delete_app_global_resources: bool,
+    pub delete_from_build: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -99,7 +109,6 @@ pub struct DeployTargetConfig {
     pub project: String,
     pub environment: String,
     pub iis_path: PathBuf,
-    pub publish_root: PathBuf,
     pub backup_root: PathBuf,
     pub deploy_mode: String,
     pub use_app_offline: bool,
@@ -124,6 +133,7 @@ pub struct RawConfig {
     pub tools: ToolConfig,
     pub defaults: DefaultsConfig,
     pub environments: Vec<EnvironmentConfig>,
+    pub repositories: Vec<RepositoryConfig>,
     pub projects: Vec<ProjectConfig>,
     pub deploy_targets: Vec<DeployTargetConfig>,
 }
@@ -186,7 +196,18 @@ impl RawConfig {
             );
         }
 
-        // 5. Project keys must be unique
+        // 5. Repository keys must be unique
+        let mut repository_keys_seen = HashSet::new();
+        for repo in &self.repositories {
+            if !repository_keys_seen.insert(&repo.key) {
+                bail!(
+                    "Duplicate repository key '{}'. Each [[repositories]] must have a unique key.",
+                    repo.key
+                );
+            }
+        }
+
+        // 6. Project keys must be unique
         let mut project_keys_seen = HashSet::new();
         for project in &self.projects {
             if !project_keys_seen.insert(&project.key) {
@@ -197,7 +218,7 @@ impl RawConfig {
             }
         }
 
-        // 6. Environment keys must be unique
+        // 7. Environment keys must be unique
         let mut env_keys_seen = HashSet::new();
         for env in &self.environments {
             if !env_keys_seen.insert(&env.key) {
@@ -209,10 +230,33 @@ impl RawConfig {
         }
 
         // Build lookup maps for validation
+        let repository_keys: HashSet<&str> =
+            self.repositories.iter().map(|r| r.key.as_str()).collect();
         let project_keys: HashSet<&str> = self.projects.iter().map(|p| p.key.as_str()).collect();
         let env_keys: HashSet<&str> = self.environments.iter().map(|e| e.key.as_str()).collect();
 
-        // 7. Deploy targets must reference valid project and environment
+        // 8. Projects must reference valid repositories
+        for project in &self.projects {
+            ensure!(
+                repository_keys.contains(project.repository.as_str()),
+                "Project '{}' references unknown repository key '{}'. Valid keys: {:?}",
+                project.key,
+                project.repository,
+                repository_keys
+            );
+            ensure!(
+                !project.project_file.is_absolute(),
+                "Project '{}' has project_file='{}'. project_file must be relative to the cloned repository root.",
+                project.key,
+                project.project_file.display()
+            );
+            validate_relative_entries(
+                &project.delete_from_build,
+                &format!("project '{}'.delete_from_build", project.key),
+            )?;
+        }
+
+        // 9. Deploy targets must reference valid project and environment
         for dt in &self.deploy_targets {
             ensure!(
                 project_keys.contains(dt.project.as_str()),
@@ -228,16 +272,16 @@ impl RawConfig {
             );
         }
 
-        // 8. main_branch must not be empty
-        for project in &self.projects {
+        // 10. main_branch must not be empty
+        for repo in &self.repositories {
             ensure!(
-                !project.main_branch.is_empty(),
-                "Project '{}' has an empty main_branch.",
-                project.key
+                !repo.main_branch.is_empty(),
+                "Repository '{}' has an empty main_branch.",
+                repo.key
             );
         }
 
-        // 9. deploy_mode only accepts "overlay" in MVP
+        // 11. deploy_mode only accepts "overlay" in MVP
         for dt in &self.deploy_targets {
             ensure!(
                 dt.deploy_mode == "overlay",
@@ -246,7 +290,7 @@ impl RawConfig {
             );
         }
 
-        // 10. use_app_offline must be false in MVP
+        // 12. use_app_offline must be false in MVP
         for dt in &self.deploy_targets {
             ensure!(
                 !dt.use_app_offline,
@@ -255,22 +299,16 @@ impl RawConfig {
             );
         }
 
-        // 11. Ensure required directories can be created
+        // 13. Ensure required directories can be created
         ensure_dir_creatable(&self.app.data_dir, "app.data_dir")?;
         ensure_dir_creatable(&self.app.log_dir, "app.log_dir")?;
+        ensure_dir_creatable(&self.app.workspace_root, "app.workspace_root")?;
         for project in &self.projects {
             let matching_targets = self
                 .deploy_targets
                 .iter()
                 .filter(|dt| dt.project == project.key);
             for dt in matching_targets {
-                ensure_dir_creatable(
-                    &dt.publish_root,
-                    &format!(
-                        "deploy_target (project='{}', env='{}').publish_root",
-                        dt.project, dt.environment
-                    ),
-                )?;
                 ensure_dir_creatable(
                     &dt.backup_root,
                     &format!(
@@ -297,6 +335,32 @@ fn ensure_dir_creatable(path: &Path, label: &str) -> Result<()> {
         std::fs::create_dir_all(path).with_context(|| {
             format!("Cannot create directory {} ('{}').", label, path.display())
         })?;
+    }
+    Ok(())
+}
+
+fn validate_relative_entries(entries: &[String], label: &str) -> Result<()> {
+    for entry in entries {
+        let path = Path::new(entry);
+        ensure!(
+            !entry.trim().is_empty(),
+            "{} contains an empty path entry.",
+            label
+        );
+        ensure!(
+            !path.is_absolute(),
+            "{} contains absolute path '{}'. Entries must be relative to the build root.",
+            label,
+            entry
+        );
+        ensure!(
+            !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "{} contains path traversal '{}'.",
+            label,
+            entry
+        );
     }
     Ok(())
 }
@@ -339,6 +403,7 @@ name = "Test Bot"
 timezone = "Asia/Ho_Chi_Minh"
 data_dir = "/tmp/testbot/data"
 log_dir = "/tmp/testbot/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN"
@@ -394,14 +459,24 @@ requires_double_confirm = false
 [[environments]]
 key = "production"
 name = "Production"
-requires_double_confirm = true
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/testbot/workspace/webpos"
-project_file = "/tmp/testbot/workspace/webpos/WebPOS.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 quick_branches = ["master", "develop"]
@@ -439,6 +514,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "DOES_NOT_EXIST"
@@ -476,14 +552,24 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = ""
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 
@@ -516,6 +602,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_2"
@@ -553,23 +640,34 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/a.git"
 workspace = "/tmp/test/a"
-project_file = "/tmp/test/a/a.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 
 [[projects]]
 key = "webpos"
 name = "WebPOS Duplicate"
+repository = "repo"
 repo_url = "git@github.com:test/b.git"
 workspace = "/tmp/test/b"
-project_file = "/tmp/test/b/b.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "main"
 
@@ -600,6 +698,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_3"
@@ -637,14 +736,24 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 
@@ -675,6 +784,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_4"
@@ -712,14 +822,24 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 
@@ -750,6 +870,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_5"
@@ -787,16 +908,25 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = ""
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
-main_branch = ""
 
 [[deploy_targets]]
 project = "webpos"
@@ -826,6 +956,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_6"
@@ -863,14 +994,24 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 

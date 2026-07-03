@@ -5,6 +5,7 @@ use teloxide::prelude::*;
 
 use crate::commands::{self, AppState, Command};
 use crate::config::Config;
+use crate::job::JobStore;
 use crate::session::SessionStore;
 
 pub async fn run_bot(config: Arc<Config>) -> anyhow::Result<()> {
@@ -14,6 +15,7 @@ pub async fn run_bot(config: Arc<Config>) -> anyhow::Result<()> {
     let state = AppState {
         config,
         session_store: SessionStore::new(),
+        job_store: JobStore::new(),
     };
 
     let command_handler = Update::filter_message()

@@ -1,5 +1,11 @@
 /target
 /config.toml
+/logs/
+/data/
+/backup/
+/publish/
+/repos/
+E:*
 *.swp
 *.swo
 .DS_Store

@@ -7,7 +7,9 @@ use teloxide::utils::command::BotCommands as _;
 
 use crate::auth::{self, AuthContext, Permission};
 use crate::config::Config;
+use crate::job::{Job, JobStore};
 use crate::menu;
+use crate::runner;
 use crate::session::{DeployAction, Session, SessionStep, SessionStore};
 
 #[derive(BotCommands, Clone, Debug)]
@@ -31,6 +33,7 @@ pub enum Command {
 pub struct AppState {
     pub config: Arc<Config>,
     pub session_store: SessionStore,
+    pub job_store: JobStore,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,22 +115,22 @@ pub async fn handle_start(msg: Message, bot: Bot, state: AppState) -> Result<(),
     let reply = match user_id {
         Some(uid) => match auth::authenticate(&state.config, uid, chat_id.0) {
             Ok(ctx) => format!(
-                "👋 Welcome, {}!\n\n\
+                "Xin chào, {}.\n\n\
                  Role: {}\n\
                  Chat ID: {}\n\n\
-                 Available commands:\n{}",
+                 Lệnh dùng nhanh:\n{}",
                 ctx.user.name,
                 ctx.user.role,
                 chat_id.0,
                 Command::descriptions()
             ),
             Err(e) => format!(
-                "❌ Access denied:\n{}\n\n\
-                 Make sure your user ID ({}) and chat ID ({}) are in the config.",
+                "❌ Không có quyền truy cập:\n{}\n\n\
+                 User ID ({}) và Chat ID ({}) cần được khai báo trong config.",
                 e, uid, chat_id.0
             ),
         },
-        None => "❌ Could not identify you. Telegram user info is missing.".to_string(),
+        None => "❌ Không xác định được Telegram user.".to_string(),
     };
 
     send_plain(&bot, chat_id, &reply).await?;
@@ -145,12 +148,12 @@ pub async fn handle_whoami(msg: Message, bot: Bot, state: AppState) -> Result<()
     let reply = match user_id {
         Some(uid) => match auth::authenticate(&state.config, uid, chat_id.0) {
             Ok(ctx) => format!(
-                "📋 Your Info\n\n\
+                "📋 Thông tin tài khoản\n\n\
                  User ID: {}\n\
                  Chat ID: {}\n\
-                 Name: {}\n\
+                 Tên: {}\n\
                  Role: {}\n\n\
-                 Permissions:\n\
+                 Quyền:\n\
                  * Build: {}\n\
                  * Deploy Staging: {}\n\
                  * Deploy Production: {}\n\
@@ -169,15 +172,15 @@ pub async fn handle_whoami(msg: Message, bot: Bot, state: AppState) -> Result<()
                 yesno(ctx.permissions.can_cancel_jobs),
             ),
             Err(e) => format!(
-                "❌ Not authorized:\n{}\n\n\
+                "❌ Chưa được cấp quyền:\n{}\n\n\
                  User ID: {}\n\
                  Chat ID: {}",
                 e, uid, chat_id.0
             ),
         },
         None => format!(
-            "Anonymous user.\nChat ID: {}\n\n\
-             Please start a private chat with the bot to identify yourself.",
+            "Không xác định được user.\nChat ID: {}\n\n\
+             Hãy chat riêng với bot để lấy User ID.",
             chat_id.0
         ),
     };
@@ -209,8 +212,8 @@ pub async fn handle_deploy(msg: Message, bot: Bot, state: AppState) -> Result<()
         send_plain(
             &bot,
             chat_id,
-            "⚠️ You already have an active session.\n\
-             Use /cancel to end it, then /deploy again.",
+            "⚠️ Bạn đang có một phiên deploy chưa kết thúc.\n\
+             Dùng /cancel để hủy phiên cũ rồi chạy /deploy lại.",
         )
         .await?;
         return Ok(());
@@ -218,7 +221,7 @@ pub async fn handle_deploy(msg: Message, bot: Bot, state: AppState) -> Result<()
 
     let session = state.session_store.create(ctx.user.id, chat_id.0).await;
 
-    let text = "🚀 *Deploy Wizard*\n\nStep 1\\: Select an environment";
+    let text = "🚀 *Deploy Wizard*\n\n*Bước 1/5:* Chọn môi trường";
     let keyboard = menu::environment_keyboard(&state.config);
 
     let sent = bot
@@ -251,12 +254,24 @@ pub async fn handle_status(msg: Message, bot: Bot, state: AppState) -> Result<()
         return Ok(());
     }
 
-    send_plain(
-        &bot,
-        chat_id,
-        "📊 Status\n\nNo active jobs. (Phase 7 will add job tracking here.)",
-    )
-    .await?;
+    let jobs = state.job_store.recent_for_chat(chat_id.0, 5).await;
+    if jobs.is_empty() {
+        send_plain(&bot, chat_id, "📊 Trạng thái\n\nChưa có job nào.").await?;
+    } else {
+        let mut text = String::from("📊 Job gần đây\n\n");
+        for job in jobs {
+            text.push_str(&format!(
+                "#{} - {}\nProject: {} / {}\nBranch: {}\nStage: {}\n\n",
+                short_id(&job.job_id),
+                job.status.label(),
+                job.project_key,
+                job.environment_key,
+                job.branch,
+                job.stage
+            ));
+        }
+        send_plain(&bot, chat_id, &text).await?;
+    }
 
     Ok(())
 }
@@ -278,12 +293,32 @@ pub async fn handle_log(msg: Message, bot: Bot, state: AppState) -> Result<(), a
         return Ok(());
     }
 
-    send_plain(
-        &bot,
-        chat_id,
-        "📋 Log\n\nNo recent jobs. (Phase 7 will add log retrieval here.)",
-    )
-    .await?;
+    let jobs = state.job_store.recent_for_chat(chat_id.0, 1).await;
+    if let Some(job) = jobs.first() {
+        let mut text = format!(
+            "📋 Log job #{}\nStatus: {}\nStage: {}\n\n",
+            short_id(&job.job_id),
+            job.status.label(),
+            job.stage
+        );
+        for line in job
+            .log
+            .iter()
+            .rev()
+            .take(state.config.defaults.max_log_lines_in_telegram)
+            .rev()
+        {
+            text.push_str(line);
+            text.push('\n');
+        }
+        if let Some(error) = &job.error {
+            text.push_str("\nLỗi:\n");
+            text.push_str(error);
+        }
+        send_plain(&bot, chat_id, &text).await?;
+    } else {
+        send_plain(&bot, chat_id, "📋 Log\n\nChưa có job nào.").await?;
+    }
 
     Ok(())
 }
@@ -348,7 +383,7 @@ pub async fn handle_callback(
         Some(s) => s,
         None => {
             bot.answer_callback_query(&callback_id)
-                .text("No active session. Use /deploy to start.")
+                .text("Không có phiên deploy. Dùng /deploy để bắt đầu.")
                 .await?;
             return Ok(());
         }
@@ -357,7 +392,7 @@ pub async fn handle_callback(
     // Only the session owner can press buttons
     if session.owner_user_id != user_id {
         bot.answer_callback_query(&callback_id)
-            .text("This session belongs to another user.")
+            .text("Phiên deploy này thuộc user khác.")
             .await?;
         return Ok(());
     }
@@ -366,14 +401,7 @@ pub async fn handle_callback(
     match data.as_str() {
         "nav:cancel" => {
             state.session_store.remove(&session.session_id).await;
-            edit_session_message(
-                &bot,
-                chat_id,
-                session.message_id,
-                "❌ Deploy cancelled",
-                None,
-            )
-            .await;
+            edit_session_message(&bot, chat_id, session.message_id, "❌ Đã hủy deploy", None).await;
             bot.answer_callback_query(callback_id).await?;
             return Ok(());
         }
@@ -382,7 +410,7 @@ pub async fn handle_callback(
             session.set_step(prev);
             state.session_store.update(session.clone()).await;
             bot.answer_callback_query(callback_id).await?;
-            show_step(&session, &state, &bot, chat_id).await;
+            show_step(&session, &state, &bot, chat_id).await?;
             return Ok(());
         }
         _ => {}
@@ -407,7 +435,7 @@ pub async fn handle_callback(
         }
         _ => {
             bot.answer_callback_query(&callback_id)
-                .text("Session in an unexpected state. Use /cancel to reset.")
+                .text("Phiên deploy đang lỗi trạng thái. Dùng /cancel để reset.")
                 .await?;
         }
     }
@@ -448,21 +476,18 @@ pub async fn handle_text_message(
         return Ok(()); // Not waiting for input
     }
 
-    let proj = session
-        .project_key
-        .as_ref()
-        .and_then(|k| state.config.projects.iter().find(|p| p.key == *k));
+    let repo = session_repository(&session, &state.config);
 
-    match validate_manual_branch(raw_text, proj) {
+    match validate_manual_branch(raw_text, repo) {
         Ok(branch) => {
             session.branch = Some(branch);
             session.set_step(SessionStep::SelectAction);
             state.session_store.update(session.clone()).await;
 
-            show_step(&session, &state, &bot, chat_id).await;
+            show_step(&session, &state, &bot, chat_id).await?;
         }
         Err(e) => {
-            send_plain(&bot, chat_id, &format!("❌ Invalid branch: {}", e)).await?;
+            send_plain(&bot, chat_id, &format!("❌ Branch không hợp lệ: {}", e)).await?;
         }
     }
 
@@ -473,11 +498,11 @@ pub async fn handle_text_message(
 // Branch validation
 // ---------------------------------------------------------------------------
 
-/// Validate a manual branch name according to project rules.
+/// Validate a manual branch name according to repository rules.
 /// Returns the trimmed branch name on success, or an error message on failure.
 pub fn validate_manual_branch(
     input: &str,
-    project: Option<&crate::config::ProjectConfig>,
+    repository: Option<&crate::config::RepositoryConfig>,
 ) -> Result<String, String> {
     let trimmed = input.trim();
 
@@ -527,31 +552,31 @@ pub fn validate_manual_branch(
         return Err("Branch name must not contain '//'.".to_string());
     }
 
-    if let Some(proj) = project {
-        // Must match at least one manual_branch_patterns
-        if !proj.manual_branch_patterns.is_empty() {
-            let matched = proj
-                .manual_branch_patterns
-                .iter()
-                .any(|pat| glob_match(pat, trimmed));
-            if !matched {
-                return Err(format!(
-                    "Branch '{}' does not match any allowed pattern: {:?}",
-                    trimmed, proj.manual_branch_patterns
-                ));
-            }
-        }
-
+    if let Some(repo) = repository {
         // Must not match forbidden_branch_patterns
-        if !proj.forbidden_branch_patterns.is_empty() {
-            let forbidden = proj
+        if !repo.forbidden_branch_patterns.is_empty() {
+            let forbidden = repo
                 .forbidden_branch_patterns
                 .iter()
                 .any(|pat| glob_match(pat, trimmed));
             if forbidden {
                 return Err(format!(
                     "Branch '{}' matches a forbidden pattern: {:?}",
-                    trimmed, proj.forbidden_branch_patterns
+                    trimmed, repo.forbidden_branch_patterns
+                ));
+            }
+        }
+
+        // Must match at least one manual_branch_patterns
+        if !repo.manual_branch_patterns.is_empty() {
+            let matched = repo
+                .manual_branch_patterns
+                .iter()
+                .any(|pat| glob_match(pat, trimmed));
+            if !matched {
+                return Err(format!(
+                    "Branch '{}' does not match any allowed pattern: {:?}",
+                    trimmed, repo.manual_branch_patterns
                 ));
             }
         }
@@ -622,7 +647,7 @@ async fn handle_env_selected(
     let env_exists = env.is_some();
     if !env_exists {
         bot.answer_callback_query(callback_id)
-            .text("Unknown environment.")
+            .text("Không tìm thấy môi trường.")
             .await?;
         return Ok(());
     }
@@ -632,7 +657,7 @@ async fn handle_env_selected(
     state.session_store.update(session.clone()).await;
 
     bot.answer_callback_query(callback_id).await?;
-    show_step(session, state, bot, chat_id).await;
+    show_step(session, state, bot, chat_id).await?;
     Ok(())
 }
 
@@ -653,7 +678,7 @@ async fn handle_project_selected(
         Some(k) => k,
         None => {
             bot.answer_callback_query(callback_id)
-                .text("No environment selected.")
+                .text("Chưa chọn môi trường.")
                 .await?;
             return Ok(());
         }
@@ -663,7 +688,7 @@ async fn handle_project_selected(
     let proj = state.config.projects.iter().find(|p| p.key == proj_key);
     if proj.is_none() {
         bot.answer_callback_query(callback_id)
-            .text("Unknown project.")
+            .text("Không tìm thấy project.")
             .await?;
         return Ok(());
     }
@@ -676,7 +701,7 @@ async fn handle_project_selected(
         .any(|dt| dt.project == proj_key && dt.environment == *env_key);
     if !has_target {
         bot.answer_callback_query(callback_id)
-            .text("No deploy target for this project/environment.")
+            .text("Project này chưa có target cho môi trường đã chọn.")
             .await?;
         return Ok(());
     }
@@ -686,7 +711,7 @@ async fn handle_project_selected(
     state.session_store.update(session.clone()).await;
 
     bot.answer_callback_query(callback_id).await?;
-    show_step(session, state, bot, chat_id).await;
+    show_step(session, state, bot, chat_id).await?;
     Ok(())
 }
 
@@ -702,12 +727,19 @@ async fn handle_branch_selected(
         .project_key
         .as_ref()
         .and_then(|k| state.config.projects.iter().find(|p| p.key == *k));
+    let repo = proj.and_then(|p| {
+        state
+            .config
+            .repositories
+            .iter()
+            .find(|r| r.key == p.repository)
+    });
 
     match data {
         "branch:manual" => {
-            let msg = match proj {
-                Some(p) => {
-                    let examples: Vec<&str> = p
+            let msg = match (proj, repo) {
+                (Some(p), Some(r)) => {
+                    let examples: Vec<&str> = r
                         .manual_branch_patterns
                         .iter()
                         .take(3)
@@ -721,7 +753,7 @@ async fn handle_branch_selected(
                         examples.join("\n")
                     )
                 }
-                None => "✍️ Enter branch name.".to_string(),
+                _ => "✍️ Enter branch name.".to_string(),
             };
 
             session.set_step(SessionStep::WaitingManualBranch);
@@ -738,8 +770,8 @@ async fn handle_branch_selected(
             }
 
             // Validate branch is main_branch or in quick_branches
-            let valid = match proj {
-                Some(p) => branch == p.main_branch || p.quick_branches.iter().any(|b| b == branch),
+            let valid = match repo {
+                Some(r) => branch == r.main_branch || r.quick_branches.iter().any(|b| b == branch),
                 None => false,
             };
             if !valid {
@@ -754,7 +786,7 @@ async fn handle_branch_selected(
             state.session_store.update(session.clone()).await;
 
             bot.answer_callback_query(callback_id).await?;
-            show_step(session, state, bot, chat_id).await;
+            show_step(session, state, bot, chat_id).await?;
             Ok(())
         }
     }
@@ -806,7 +838,7 @@ async fn handle_action_selected(
             if let Err(e) = check_action_permission(&ctx, action, env_key, &state.config) {
                 session.action = saved_action; // restore
                 bot.answer_callback_query(callback_id)
-                    .text(&format!("Permission denied: {}", e))
+                    .text(format!("Permission denied: {}", e))
                     .await?;
                 return Ok(());
             }
@@ -814,7 +846,7 @@ async fn handle_action_selected(
         Err(e) => {
             session.action = saved_action; // restore
             bot.answer_callback_query(callback_id)
-                .text(&format!("Auth error: {}", e))
+                .text(format!("Auth error: {}", e))
                 .await?;
             return Ok(());
         }
@@ -824,7 +856,7 @@ async fn handle_action_selected(
     state.session_store.update(session.clone()).await;
 
     bot.answer_callback_query(callback_id).await?;
-    show_step(session, state, bot, chat_id).await;
+    show_step(session, state, bot, chat_id).await?;
     Ok(())
 }
 
@@ -849,16 +881,81 @@ async fn handle_confirm(
                 bot.answer_callback_query(callback_id).await?;
                 show_step(session, state, bot, chat_id).await
             } else {
+                let project_key = match session.project_key.clone() {
+                    Some(v) => v,
+                    None => {
+                        bot.answer_callback_query(callback_id)
+                            .text("Missing project.")
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let environment_key = match session.environment_key.clone() {
+                    Some(v) => v,
+                    None => {
+                        bot.answer_callback_query(callback_id)
+                            .text("Missing environment.")
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let branch = match session.branch.clone() {
+                    Some(v) => v,
+                    None => {
+                        bot.answer_callback_query(callback_id)
+                            .text("Missing branch.")
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let action = match session.action {
+                    Some(v) => v,
+                    None => {
+                        bot.answer_callback_query(callback_id)
+                            .text("Missing action.")
+                            .await?;
+                        return Ok(());
+                    }
+                };
+
+                if state
+                    .job_store
+                    .has_running_target(&project_key, &environment_key)
+                    .await
+                {
+                    bot.answer_callback_query(callback_id)
+                        .text("This project/environment already has a queued or running job.")
+                        .await?;
+                    return Ok(());
+                }
+
+                let job = Job::new(
+                    session.owner_user_id,
+                    chat_id.0,
+                    project_key,
+                    environment_key,
+                    branch,
+                    action,
+                );
+                let job_id = job.job_id.clone();
+                state.job_store.insert(job).await;
+
                 session.set_step(SessionStep::Done);
                 state.session_store.update(session.clone()).await;
 
-                // Phase 8+: queue actual job
-                // For now, just report completion
                 bot.answer_callback_query(callback_id)
                     .text("Deploy queued!")
                     .await?;
-                let report = build_complete_text(session, state);
+                let report = build_complete_text(session, state, &job_id);
                 edit_session_message(bot, chat_id, session.message_id, &report, None).await;
+
+                let runner_state = state.clone();
+                let runner_bot = bot.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = runner::run_job(job_id, runner_bot, runner_state).await {
+                        tracing::error!("Job runner failed: {:?}", e);
+                    }
+                });
                 Ok(())
             }
         }
@@ -899,7 +996,7 @@ async fn show_step(
 fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKeyboardMarkup) {
     match session.step {
         SessionStep::SelectEnvironment => {
-            let text = "🚀 *Deploy Wizard*\n\nStep 1\\: Select an environment".to_string();
+            let text = "🚀 *Deploy Wizard*\n\n*Bước 1/5:* Chọn môi trường".to_string();
             let keyboard = menu::environment_keyboard(&state.config);
             (text, keyboard)
         }
@@ -912,7 +1009,7 @@ fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKey
                 .unwrap_or("?");
 
             let text = format!(
-                "🚀 *Deploy Wizard* — *{}*\n\nStep 2\\: Select a project",
+                "🚀 *Deploy Wizard*\n\n*Môi trường:* {}\n\n*Bước 2/5:* Chọn project",
                 escape_md_v2(env_name)
             );
 
@@ -921,24 +1018,26 @@ fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKey
             (text, keyboard)
         }
         SessionStep::SelectBranch => {
-            let proj = session
-                .project_key
-                .as_ref()
-                .and_then(|k| state.config.projects.iter().find(|p| p.key == *k));
+            let proj = session_project(session, &state.config);
+            let repo = session_repository(session, &state.config);
 
             let proj_name = proj.map(|p| &p.name[..]).unwrap_or("?");
+            let env_name = selected_env_name(session, &state.config);
+            let repo_name = repo.map(|r| &r.name[..]).unwrap_or("?");
 
             let text = format!(
-                "🚀 *Deploy Wizard* — *{}*\n\nStep 3\\: Select a branch",
-                escape_md_v2(proj_name)
+                "🚀 *Deploy Wizard*\n\n*Môi trường:* {}\n*Project:* {}\n*Repo:* {}\n\n*Bước 3/5:* Chọn branch",
+                escape_md_v2(env_name),
+                escape_md_v2(proj_name),
+                escape_md_v2(repo_name)
             );
 
-            let (main_branch, quick, manual) = proj
-                .map(|p| {
+            let (main_branch, quick, manual) = repo
+                .map(|r| {
                     (
-                        p.main_branch.as_str(),
-                        p.quick_branches.clone(),
-                        p.manual_branch_enabled,
+                        r.main_branch.as_str(),
+                        r.quick_branches.clone(),
+                        r.manual_branch_enabled,
                     )
                 })
                 .unwrap_or(("master", vec![], false));
@@ -946,24 +1045,42 @@ fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKey
             (text, keyboard)
         }
         SessionStep::WaitingManualBranch => {
-            let proj_name = session
-                .project_key
-                .as_ref()
-                .and_then(|k| state.config.projects.iter().find(|p| p.key == *k))
+            let proj_name = session_project(session, &state.config)
                 .map(|p| &p.name[..])
                 .unwrap_or("?");
+            let repo = session_repository(session, &state.config);
+            let patterns = repo
+                .map(|r| {
+                    if r.manual_branch_patterns.is_empty() {
+                        "Không giới hạn pattern".to_string()
+                    } else {
+                        r.manual_branch_patterns.join(", ")
+                    }
+                })
+                .unwrap_or_else(|| "Không tìm thấy cấu hình repo".to_string());
 
             let text = format!(
-                "✍️ Type the branch name for *{}*\n\n\
-                 Valid patterns: `feature/*`, `bugfix/*`, `hotfix/*`, `release/*`, `dev/*`\n\n\
-                 Send the branch name as a text message\\.",
-                escape_md_v2(proj_name)
+                "✍️ *Nhập branch cho {}*\n\n\
+                 Pattern hợp lệ: `{}`\n\n\
+                 Gửi tên branch bằng tin nhắn text\\. Dùng /cancel để hủy\\.",
+                escape_md_v2(proj_name),
+                escape_md_v2(&patterns)
             );
 
             (text, InlineKeyboardMarkup::default())
         }
         SessionStep::SelectAction => {
-            let text = "🚀 *Deploy Wizard*\n\nStep 4\\: Select action".to_string();
+            let env_name = selected_env_name(session, &state.config);
+            let proj_name = session_project(session, &state.config)
+                .map(|p| &p.name[..])
+                .unwrap_or("?");
+            let branch = session.branch.as_deref().unwrap_or("?");
+            let text = format!(
+                "🚀 *Deploy Wizard*\n\n*Môi trường:* {}\n*Project:* {}\n*Branch:* `{}`\n\n*Bước 4/5:* Chọn thao tác",
+                escape_md_v2(env_name),
+                escape_md_v2(proj_name),
+                escape_md_v2(branch)
+            );
             let keyboard = menu::action_keyboard();
             (text, keyboard)
         }
@@ -978,7 +1095,8 @@ fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKey
             (text, keyboard)
         }
         SessionStep::Done => {
-            let text = "✅ *Deploy completed*\n\nCheck /status for details.".to_string();
+            let text =
+                "✅ *Job đã được tạo*\n\nDùng /status hoặc /log để xem tiến trình\\.".to_string();
             (text, InlineKeyboardMarkup::default())
         }
     }
@@ -1021,13 +1139,13 @@ fn build_summary_text(session: &Session, state: &AppState, is_double: bool) -> S
 
     if is_double {
         format!(
-            "🔴 *Confirm deploy to {}*\n\n\
-             Bạn sắp deploy Production\\.\n\
-             Bot sẽ backup IIS hiện tại rồi copy đè file từ staging vào IIS path\\.\n\n\
-             *Project:* {}\n\
-             *Branch:* `{}`\n\
-             *Action:* {}\n\
-             *Target IIS:* {}",
+            "🔴 *Xác nhận Production lần cuối*\n\n\
+             Môi trường: {}\n\
+             Project: {}\n\
+             Branch: `{}`\n\
+             Thao tác: {}\n\
+             IIS path: {}\n\n\
+             Bot sẽ build vào workspace tạm, xóa file nhạy cảm, backup IIS hiện tại rồi copy đè vào IIS\\.",
             escape_md_v2(env_name),
             escape_md_v2(proj_name),
             escape_md_v2(branch),
@@ -1036,27 +1154,30 @@ fn build_summary_text(session: &Session, state: &AppState, is_double: bool) -> S
         )
     } else {
         format!(
-            "⚠️ *Confirm deploy*\n\n\
-             *Environment:* {}\n\
+            "⚠️ *Kiểm tra trước khi chạy*\n\n\
+             *Môi trường:* {}\n\
              *Project:* {}\n\
              *Branch:* `{}`\n\
              *Commit:* `{}`\n\
-             *Action:* {}\n\
-             *Target IIS:* {}\n\
-             *Backup:* sẽ tạo trước khi copy\n\
-             *App offline:* không dùng\n\
-             *Deploy mode:* overlay, không /MIR",
+             *Thao tác:* {}\n\
+             *IIS path:* {}\n\n\
+             Flow: clone branch → MSBuild publish → xóa file nhạy cảm → backup IIS → copy overlay \\(`/E`, không `/MIR`\\){}",
             escape_md_v2(env_name),
             escape_md_v2(proj_name),
             escape_md_v2(branch),
             escape_md_v2(commit),
             escape_md_v2(&action_label),
-            escape_md_v2(&target)
+            escape_md_v2(&target),
+            if session.action == Some(DeployAction::BuildOnly) {
+                "\n\nBuild only sẽ dừng sau bước publish và cleanup build output\\."
+            } else {
+                ""
+            }
         )
     }
 }
 
-fn build_complete_text(session: &Session, state: &AppState) -> String {
+fn build_complete_text(session: &Session, state: &AppState, job_id: &str) -> String {
     let env_key = session.environment_key.as_deref().unwrap_or("?");
     let env_name = state
         .config
@@ -1082,12 +1203,14 @@ fn build_complete_text(session: &Session, state: &AppState) -> String {
         .unwrap_or_else(|| "?".to_string());
 
     format!(
-        "✅ Deploy queued\n\n\
+        "✅ Job đã được tạo\n\n\
+         *Job:* `{}`\n\
          *Project:* {}\n\
-         *Environment:* {}\n\
+         *Môi trường:* {}\n\
          *Branch:* `{}`\n\
-         *Action:* {}\n\n\
-         Job execution will be added in Phase 8\\.",
+         *Thao tác:* {}\n\n\
+         Dùng /status hoặc /log để xem tiến trình\\.",
+        escape_md_v2(short_id(job_id)),
         escape_md_v2(proj_name),
         escape_md_v2(env_name),
         escape_md_v2(branch),
@@ -1112,12 +1235,43 @@ fn previous_step(current: SessionStep) -> SessionStep {
     }
 }
 
+fn session_project<'a>(
+    session: &Session,
+    config: &'a Config,
+) -> Option<&'a crate::config::ProjectConfig> {
+    session
+        .project_key
+        .as_ref()
+        .and_then(|k| config.projects.iter().find(|p| p.key == *k))
+}
+
+fn session_repository<'a>(
+    session: &Session,
+    config: &'a Config,
+) -> Option<&'a crate::config::RepositoryConfig> {
+    session_project(session, config)
+        .and_then(|p| config.repositories.iter().find(|r| r.key == p.repository))
+}
+
+fn selected_env_name<'a>(session: &Session, config: &'a Config) -> &'a str {
+    session
+        .environment_key
+        .as_ref()
+        .and_then(|k| config.environments.iter().find(|e| e.key == *k))
+        .map(|e| e.name.as_str())
+        .unwrap_or("?")
+}
+
 fn yesno(v: bool) -> &'static str {
     if v {
         "✅ Yes"
     } else {
         "❌ No"
     }
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
 
 async fn edit_session_message(
@@ -1154,30 +1308,25 @@ async fn authenticate_or_reply(state: &AppState, bot: Bot, msg: &Message) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProjectConfig;
+    use crate::config::RepositoryConfig;
     use crate::menu;
     use std::path::PathBuf;
 
-    fn make_project(
+    fn make_repository(
         main_branch: &str,
         quick: Vec<&str>,
         patterns: Vec<&str>,
         forbidden: Vec<&str>,
-    ) -> ProjectConfig {
-        ProjectConfig {
+    ) -> RepositoryConfig {
+        RepositoryConfig {
             key: "test".to_string(),
             name: "Test".to_string(),
             repo_url: "git@github.com:test/test.git".to_string(),
-            workspace: PathBuf::from("/tmp/test"),
-            project_file: PathBuf::from("/tmp/test/test.csproj"),
-            configuration: "Release".to_string(),
             main_branch: main_branch.to_string(),
             quick_branches: quick.iter().map(|s| s.to_string()).collect(),
             manual_branch_enabled: true,
             manual_branch_patterns: patterns.iter().map(|s| s.to_string()).collect(),
             forbidden_branch_patterns: forbidden.iter().map(|s| s.to_string()).collect(),
-            delete_from_staging: vec![],
-            delete_app_global_resources: false,
         }
     }
 
@@ -1185,54 +1334,54 @@ mod tests {
 
     #[test]
     fn test_valid_branch_release() {
-        let proj = make_project(
+        let repo = make_repository(
             "master",
             vec!["master", "develop"],
             vec!["release/*", "feature/*"],
             vec!["backup/*"],
         );
-        let result = validate_manual_branch("release/2026-07-01", Some(&proj));
+        let result = validate_manual_branch("release/2026-07-01", Some(&repo));
         assert!(result.is_ok(), "Expected OK, got: {:?}", result.err());
         assert_eq!(result.unwrap(), "release/2026-07-01");
     }
 
     #[test]
     fn test_valid_branch_hotfix() {
-        let proj = make_project(
+        let repo = make_repository(
             "master",
             vec!["master", "develop"],
             vec!["hotfix/*", "feature/*"],
             vec!["backup/*"],
         );
-        let result = validate_manual_branch("hotfix/payment-qr", Some(&proj));
+        let result = validate_manual_branch("hotfix/payment-qr", Some(&repo));
         assert!(result.is_ok(), "Expected OK, got: {:?}", result.err());
         assert_eq!(result.unwrap(), "hotfix/payment-qr");
     }
 
     #[test]
     fn test_valid_branch_feature() {
-        let proj = make_project(
+        let repo = make_repository(
             "master",
             vec!["master", "develop"],
             vec!["feature/*", "release/*"],
             vec!["backup/*"],
         );
-        let result = validate_manual_branch("feature/new-pos-ui", Some(&proj));
+        let result = validate_manual_branch("feature/new-pos-ui", Some(&repo));
         assert!(result.is_ok(), "Expected OK, got: {:?}", result.err());
         assert_eq!(result.unwrap(), "feature/new-pos-ui");
     }
 
     #[test]
     fn test_invalid_branch_empty() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
-        let result = validate_manual_branch("", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
+        let result = validate_manual_branch("", Some(&repo));
         assert!(result.is_err(), "Expected error for empty branch");
     }
 
     #[test]
     fn test_invalid_branch_space() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
-        let result = validate_manual_branch("my branch", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
+        let result = validate_manual_branch("my branch", Some(&repo));
         assert!(result.is_err(), "Expected error for space branch");
         let err = result.err().unwrap();
         assert!(
@@ -1244,48 +1393,48 @@ mod tests {
 
     #[test]
     fn test_invalid_branch_path_traversal() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
-        let result = validate_manual_branch("../../x", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
+        let result = validate_manual_branch("../../x", Some(&repo));
         assert!(result.is_err(), "Expected error for path traversal");
     }
 
     #[test]
     fn test_invalid_branch_semicolon() {
-        let proj = make_project("master", vec!["master"], vec!["release/*"], vec![]);
-        let result = validate_manual_branch("release/x;del", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["release/*"], vec![]);
+        let result = validate_manual_branch("release/x;del", Some(&repo));
         assert!(result.is_err(), "Expected error for semicolon");
     }
 
     #[test]
     fn test_invalid_branch_starts_with_slash() {
-        let proj = make_project("master", vec!["master"], vec!["release/*"], vec![]);
-        let result = validate_manual_branch("/abc", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["release/*"], vec![]);
+        let result = validate_manual_branch("/abc", Some(&repo));
         assert!(result.is_err(), "Expected error for /abc");
     }
 
     #[test]
     fn test_invalid_branch_ends_with_slash() {
-        let proj = make_project("master", vec!["master"], vec!["release/*"], vec![]);
-        let result = validate_manual_branch("abc/", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["release/*"], vec![]);
+        let result = validate_manual_branch("abc/", Some(&repo));
         assert!(result.is_err(), "Expected error for abc/");
     }
 
     #[test]
     fn test_invalid_branch_double_slash() {
-        let proj = make_project("master", vec!["master"], vec!["release/*"], vec![]);
-        let result = validate_manual_branch("abc//def", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["release/*"], vec![]);
+        let result = validate_manual_branch("abc//def", Some(&repo));
         assert!(result.is_err(), "Expected error for double slash");
     }
 
     #[test]
     fn test_invalid_branch_forbidden_pattern() {
-        let proj = make_project(
+        let repo = make_repository(
             "master",
             vec!["master"],
             vec!["feature/*"],
             vec!["backup/*"],
         );
-        let result = validate_manual_branch("backup/test", Some(&proj));
+        let result = validate_manual_branch("backup/test", Some(&repo));
         assert!(result.is_err(), "Expected error for forbidden pattern");
         let err = result.err().unwrap();
         assert!(
@@ -1297,30 +1446,30 @@ mod tests {
 
     #[test]
     fn test_forbidden_char_ampersand() {
-        let proj = make_project("master", vec!["master"], vec!["release/*"], vec![]);
-        let result = validate_manual_branch("release/1&2", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["release/*"], vec![]);
+        let result = validate_manual_branch("release/1&2", Some(&repo));
         assert!(result.is_err(), "Expected error for &");
     }
 
     #[test]
     fn test_max_length() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
         let long = "feature/".to_string() + &"a".repeat(120);
-        let result = validate_manual_branch(&long, Some(&proj));
+        let result = validate_manual_branch(&long, Some(&repo));
         assert!(result.is_err(), "Expected error for long branch");
     }
 
     #[test]
     fn test_backslash_rejected() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
-        let result = validate_manual_branch("feature\\test", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
+        let result = validate_manual_branch("feature\\test", Some(&repo));
         assert!(result.is_err(), "Expected error for backslash");
     }
 
     #[test]
     fn test_single_quote_rejected() {
-        let proj = make_project("master", vec!["master"], vec!["feature/*"], vec![]);
-        let result = validate_manual_branch("feature/'test", Some(&proj));
+        let repo = make_repository("master", vec!["master"], vec!["feature/*"], vec![]);
+        let result = validate_manual_branch("feature/'test", Some(&repo));
         assert!(result.is_err(), "Expected error for single quote");
     }
 
@@ -1351,6 +1500,7 @@ mod tests {
                 timezone: "UTC".to_string(),
                 data_dir: PathBuf::from("/tmp/data"),
                 log_dir: PathBuf::from("/tmp/logs"),
+                workspace_root: PathBuf::from("/tmp/workspace"),
             },
             telegram: crate::config::TelegramConfig {
                 bot_token_env: "TEST_TOKEN".to_string(),
@@ -1375,6 +1525,7 @@ mod tests {
                 keep_success_staging: false,
             },
             environments: vec![],
+            repositories: vec![],
             projects: vec![],
             deploy_targets: vec![],
         };

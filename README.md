@@ -2,10 +2,12 @@
 
 Telegram Deploy Bot for ASP.NET WebForms on Windows Server.
 
-> **⚠️ Current status: Phase 1–4 (Config/Auth/Menu/Session/Branch validation)**
+> **⚠️ Current status: MVP deploy flow**
 >
-> Git clone, MSBuild, IIS deploy, and job runner are **not yet implemented**.
-> This is the foundation layer only.
+> The bot can queue an in-memory job that clones a repo branch, runs MSBuild FileSystem publish,
+> deletes configured sensitive build output, zips the current IIS directory, copies build output
+> over IIS with robocopy overlay mode, optionally recycles the app pool, and cleans the job workspace.
+> Persistent SQLite job history, Windows service mode, and rollback are still future work.
 
 ## Setup
 
@@ -34,7 +36,8 @@ Key settings:
 - `[[users]]` — define users with their Telegram user ID
 - `[roles.*]` — define permissions per role
 - `[[environments]]` — define environments (staging, production, etc.)
-- `[[projects]]` — define projects with repo, branch config, patterns
+- `[[repositories]]` — define repo URLs and branch rules
+- `[[projects]]` — define buildable projects inside repositories
 - `[[deploy_targets]]` — map project + environment to IIS paths
 
 ### 3. Run
@@ -69,7 +72,8 @@ Alternatively, send `/whoami` to see your current user info and permissions.
 [tools]                  # Paths to git, msbuild, robocopy, 7z, appcmd
 [defaults]               # Timeouts, limits
 [[environments]]         # Environment definitions (key, name, double_confirm)
-[[projects]]             # Project definitions (repo, branch config, patterns)
+[[repositories]]         # Repo URLs and branch config/patterns
+[[projects]]             # Project build settings inside repositories
 [[deploy_targets]]       # Project + environment → IIS path mapping
 ```
 
@@ -106,9 +110,20 @@ Manual branch input is validated against these rules:
 
 ## Quick Branch Keyboard
 
-- The `main_branch` (from project config) is always shown first with a ⭐ star.
+- The `main_branch` (from repository config) is always shown first with a ⭐ star.
 - `quick_branches` are shown after, excluding duplicates of `main_branch`.
 - If `manual_branch_enabled` is true, a "✍️ Enter branch" button is shown.
+
+## Deploy Flow
+
+1. Create a job workspace under `workspace_root/jobs/{job_id}`.
+2. Clone the selected repository branch into `{repo-key}-repo`.
+3. Publish the selected project with MSBuild into `{project-key}-build`.
+4. Delete configured `delete_from_build` entries from the build output.
+5. For deploy actions, zip the current IIS directory to `backup_root/{environment}/yyyy-MM-dd/{project}-HH-MM-SS.zip`.
+6. Copy build output to IIS with `robocopy /E` overlay mode. Robocopy exit codes `0..=7` are treated as success.
+7. Recycle the configured app pool when enabled.
+8. Clean the job workspace on success; on failure, `keep_staging_on_failure` controls cleanup.
 
 ## Development
 
@@ -147,15 +162,15 @@ src/
 ├── session.rs   # Session state machine
 ├── config.rs    # Config loading & validation
 ├── auth.rs      # Authentication & permission checks
-├── git.rs       # (Phase 5+) Git operations
-├── msbuild.rs   # (Phase 5+) MSBuild operations
-├── deploy.rs    # (Phase 6+) Deploy operations
-├── iis.rs       # (Phase 6+) IIS operations
-├── backup.rs    # (Phase 6+) Backup operations
-├── staging.rs   # (Phase 6+) Staging operations
-├── storage.rs   # (Phase 7+) Persistent storage
-├── job.rs       # (Phase 7+) Job queue
-├── runner.rs    # (Phase 7+) Job runner
+├── git.rs       # Git clone / commit resolve
+├── msbuild.rs   # MSBuild FileSystem publish
+├── deploy.rs    # Robocopy overlay deploy
+├── iis.rs       # IIS app pool recycle
+├── backup.rs    # Zip backup of current IIS directory
+├── staging.rs   # Build output cleanup
+├── storage.rs   # Future persistent storage
+├── job.rs       # In-memory job state
+├── runner.rs    # Job runner
 ├── service.rs   # (Phase 7+) Windows service
 └── log.rs       # (Phase 7+) Log viewer
 ```
@@ -168,7 +183,7 @@ src/
 | 2 | ✅ | Authentication & permissions |
 | 3 | ✅ | Menu & keyboard builders |
 | 4 | ✅ | Session state machine & branch validation |
-| 5 | ⬜ | Git clone & MSBuild |
-| 6 | ⬜ | IIS deploy & backup |
-| 7 | ⬜ | Job queue, runner, persistent storage |
-| 8 | ⬜ | Windows service, log viewer, rollback |
+| 5 | ✅ | Git clone & MSBuild |
+| 6 | ✅ | IIS deploy & backup |
+| 7 | 🟡 | In-memory job queue and runner; persistent storage pending |
+| 8 | ⬜ | Windows service, persistent log viewer, rollback |

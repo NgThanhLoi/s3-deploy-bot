@@ -3,6 +3,7 @@ name = "S3 Deploy Bot"
 timezone = "Asia/Ho_Chi_Minh"
 data_dir = "E:\\BuildAgent\\data"
 log_dir = "E:\\BuildAgent\\logs"
+workspace_root = "E:\\BuildAgent\\workspace"
 
 [telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
@@ -60,41 +61,37 @@ key = "production"
 name = "Production"
 requires_double_confirm = true
 
-[[projects]]
-key = "webpos"
-name = "WebPOS"
-repo_url = "git@github.com:your-org/webpos.git"
-workspace = "E:\\BuildAgent\\repos\\webpos"
-project_file = "E:\\BuildAgent\\repos\\webpos\\WebPOS.csproj"
-configuration = "Release"
+[[repositories]]
+key = "s3retail"
+name = "S3Retail"
+repo_url = "https://github.com/your-org/s3retail-new.git"
 main_branch = "master"
 quick_branches = ["master", "develop"]
 manual_branch_enabled = true
 manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
 forbidden_branch_patterns = ["backup/*", "archive/*", "danger/*"]
-delete_from_staging = [
+
+[[projects]]
+key = "webpos"
+name = "WebPOS"
+repository = "s3retail"
+project_file = "Websites\\WebPOS\\WebPOS.csproj"
+configuration = "Release"
+precompile_before_publish = true
+enable_updateable = true
+delete_from_build = [
     "web.config",
     "ConnectionStrings.config",
-    "MBBank.json"
+    "MBBank.json",
+    "PaymentSetting"
 ]
-delete_app_global_resources = false
 
 [[deploy_targets]]
 project = "webpos"
 environment = "production"
-iis_path = "E:\\Websites\\WebPOS"
-publish_root = "E:\\BuildAgent\\publish\\webpos"
+iis_path = "D:\\wwwroot\\S3Retail\\WebPOS"
 backup_root = "E:\\BuildAgent\\backup\\webpos"
 deploy_mode = "overlay"
 use_app_offline = false
 recycle_app_pool_after_deploy = true
 app_pool_name = "WebPOS"
-preserve_files = [
-    "web.config",
-    "ConnectionStrings.config",
-    "MBBank.json"
-]
-preserve_dirs = [
-    "Images",
-    "PaymentSetting"
-]

@@ -98,6 +98,7 @@ name = "Test"
 timezone = "UTC"
 data_dir = "/tmp/test/data"
 log_dir = "/tmp/test/logs"
+workspace_root = "/tmp/test/workspace-root"
 
 [telegram]
 bot_token_env = "TEST_BOT_TOKEN_AUTH"
@@ -161,14 +162,24 @@ keep_success_staging = false
 [[environments]]
 key = "staging"
 name = "Staging"
-requires_double_confirm = false
+
+[[repositories]]
+key = "repo"
+name = "Repo"
+repo_url = "git@github.com:test/repo.git"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*"]
 
 [[projects]]
 key = "webpos"
 name = "WebPOS"
+repository = "repo"
 repo_url = "git@github.com:test/webpos.git"
 workspace = "/tmp/test/workspace"
-project_file = "/tmp/test/workspace/test.csproj"
+project_file = "WebPOS.csproj"
 configuration = "Release"
 main_branch = "master"
 

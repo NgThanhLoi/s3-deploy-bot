@@ -39,11 +39,20 @@ use crate::config::Config;
 struct Cli {
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
+
+    #[arg(long, help = "Run as a Windows Service. Use this from sc.exe binPath.")]
+    service: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.service {
+        service::run(cli.config)?;
+        return Ok(());
+    }
+
     let config = Config::from_file(&cli.config)?;
     let _guard = setup_tracing(&config)?;
 

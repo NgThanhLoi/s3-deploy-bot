@@ -11,7 +11,7 @@ pub fn environment_keyboard(config: &Config) -> InlineKeyboardMarkup {
             let icon = if env.requires_double_confirm {
                 "🔴"
             } else {
-                "🧪"
+                "🟢"
             };
             vec![InlineKeyboardButton::callback(
                 format!("{} {}", icon, env.name),
@@ -83,11 +83,11 @@ pub fn branch_keyboard(
 pub fn action_keyboard() -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(
-            "🧱 Build only",
+            "🧱 Chỉ build",
             "action:build",
         )],
         vec![InlineKeyboardButton::callback(
-            "🚀 Backup + Deploy IIS",
+            "🚀 Backup + deploy IIS",
             "action:deploy",
         )],
         vec![back_button(), cancel_button()],
@@ -98,20 +98,20 @@ pub fn confirm_keyboard(double: bool) -> InlineKeyboardMarkup {
     if double {
         InlineKeyboardMarkup::new(vec![vec![
             InlineKeyboardButton::callback("✅ Confirm Deploy", "confirm:yes"),
-            InlineKeyboardButton::callback("❌ Cancel", "confirm:no"),
+            InlineKeyboardButton::callback("❌ Hủy", "confirm:no"),
         ]])
     } else {
         InlineKeyboardMarkup::new(vec![vec![
             InlineKeyboardButton::callback("✅ Tôi hiểu, tiếp tục", "confirm:yes"),
-            InlineKeyboardButton::callback("❌ Cancel", "confirm:no"),
+            InlineKeyboardButton::callback("❌ Hủy", "confirm:no"),
         ]])
     }
 }
 
 fn back_button() -> InlineKeyboardButton {
-    InlineKeyboardButton::callback("⬅️ Back", "nav:back")
+    InlineKeyboardButton::callback("⬅️ Quay lại", "nav:back")
 }
 
 fn cancel_button() -> InlineKeyboardButton {
-    InlineKeyboardButton::callback("❌ Cancel", "nav:cancel")
+    InlineKeyboardButton::callback("❌ Hủy", "nav:cancel")
 }
