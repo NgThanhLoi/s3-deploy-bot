@@ -11,6 +11,10 @@ fn git_command(tools: &ToolConfig) -> Command {
     command
 }
 
+fn mirror_branch_ref(branch: &str) -> String {
+    format!("refs/heads/{}", branch)
+}
+
 pub fn checkout_fresh_worktree(
     tools: &ToolConfig,
     repo: &RepositoryConfig,
@@ -141,24 +145,25 @@ fn prune_stale_worktrees(tools: &ToolConfig, mirror_dir: &Path) -> Result<()> {
 }
 
 fn resolve_remote_branch(tools: &ToolConfig, mirror_dir: &Path, branch: &str) -> Result<String> {
+    let branch_ref = mirror_branch_ref(branch);
     let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("rev-parse")
-        .arg(format!("refs/remotes/origin/{}", branch))
+        .arg(&branch_ref)
         .output()
         .with_context(|| {
             format!(
-                "Failed to start git rev-parse for origin/{} in '{}'",
-                branch,
+                "Failed to start git rev-parse for '{}' in '{}'",
+                branch_ref,
                 mirror_dir.display()
             )
         })?;
 
     if !output.status.success() {
         bail!(
-            "git rev-parse origin/{} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
-            branch,
+            "git rev-parse '{}' failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            branch_ref,
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -236,5 +241,13 @@ mod tests {
             .collect();
 
         assert_eq!(args, vec!["-c", "core.longpaths=true"]);
+    }
+
+    #[test]
+    fn mirror_branch_ref_uses_heads_namespace() {
+        assert_eq!(
+            mirror_branch_ref("s3-retail-prod"),
+            "refs/heads/s3-retail-prod"
+        );
     }
 }
