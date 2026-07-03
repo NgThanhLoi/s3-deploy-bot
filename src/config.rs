@@ -70,6 +70,21 @@ pub struct EnvironmentConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct QuickDeployConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub project: String,
+    pub environment: String,
+    pub branch: String,
+    #[serde(default = "default_quick_action")]
+    pub action: String,
+}
+
+fn default_quick_action() -> String {
+    "deploy".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RepositoryConfig {
     pub key: String,
     pub name: String,
@@ -132,6 +147,7 @@ pub struct RawConfig {
     pub roles: HashMap<String, RolePermissions>,
     pub tools: ToolConfig,
     pub defaults: DefaultsConfig,
+    pub quick_deploy: Option<QuickDeployConfig>,
     pub environments: Vec<EnvironmentConfig>,
     pub repositories: Vec<RepositoryConfig>,
     pub projects: Vec<ProjectConfig>,
@@ -272,7 +288,54 @@ impl RawConfig {
             );
         }
 
-        // 10. main_branch must not be empty
+        // 10. Quick deploy must reference a valid target when enabled
+        if let Some(quick) = &self.quick_deploy {
+            if quick.enabled {
+                ensure!(
+                    matches!(quick.action.as_str(), "build" | "deploy"),
+                    "quick_deploy.action must be 'build' or 'deploy', got '{}'.",
+                    quick.action
+                );
+                ensure!(
+                    project_keys.contains(quick.project.as_str()),
+                    "quick_deploy.project references unknown project key '{}'.",
+                    quick.project
+                );
+                ensure!(
+                    env_keys.contains(quick.environment.as_str()),
+                    "quick_deploy.environment references unknown environment key '{}'.",
+                    quick.environment
+                );
+                ensure!(
+                    self.deploy_targets.iter().any(
+                        |dt| dt.project == quick.project && dt.environment == quick.environment
+                    ),
+                    "quick_deploy target project='{}' environment='{}' has no deploy target.",
+                    quick.project,
+                    quick.environment
+                );
+
+                let project = self
+                    .projects
+                    .iter()
+                    .find(|p| p.key == quick.project)
+                    .expect("project key was validated");
+                let repo = self
+                    .repositories
+                    .iter()
+                    .find(|r| r.key == project.repository)
+                    .expect("project repository was validated");
+                ensure!(
+                    quick.branch == repo.main_branch
+                        || repo.quick_branches.iter().any(|b| b == &quick.branch),
+                    "quick_deploy.branch '{}' must be repository '{}' main_branch or one of quick_branches.",
+                    quick.branch,
+                    repo.key
+                );
+            }
+        }
+
+        // 11. main_branch must not be empty
         for repo in &self.repositories {
             ensure!(
                 !repo.main_branch.is_empty(),
@@ -281,7 +344,7 @@ impl RawConfig {
             );
         }
 
-        // 11. deploy_mode only accepts "overlay" in MVP
+        // 12. deploy_mode only accepts "overlay" in MVP
         for dt in &self.deploy_targets {
             ensure!(
                 dt.deploy_mode == "overlay",
@@ -290,7 +353,7 @@ impl RawConfig {
             );
         }
 
-        // 12. use_app_offline must be false in MVP
+        // 13. use_app_offline must be false in MVP
         for dt in &self.deploy_targets {
             ensure!(
                 !dt.use_app_offline,
@@ -299,7 +362,7 @@ impl RawConfig {
             );
         }
 
-        // 13. Ensure required directories can be created
+        // 14. Ensure required directories can be created
         ensure_dir_creatable(&self.app.data_dir, "app.data_dir")?;
         ensure_dir_creatable(&self.app.log_dir, "app.log_dir")?;
         ensure_dir_creatable(&self.app.workspace_root, "app.workspace_root")?;

@@ -399,7 +399,12 @@ pub async fn handle_callback(
 
     match session.step {
         SessionStep::SelectEnvironment => {
-            handle_env_selected(&mut session, &state, &bot, chat_id, &callback_id, &data).await?
+            if data == "quick:deploy" {
+                handle_quick_deploy(&mut session, &state, &bot, chat_id, &callback_id).await?
+            } else {
+                handle_env_selected(&mut session, &state, &bot, chat_id, &callback_id, &data)
+                    .await?
+            }
         }
         SessionStep::SelectProject => {
             handle_project_selected(&mut session, &state, &bot, chat_id, &callback_id, &data)
@@ -638,6 +643,79 @@ async fn handle_env_selected(
     state.session_store.update(session.clone()).await;
 
     bot.answer_callback_query(callback_id).await?;
+    show_step(session, state, bot, chat_id).await?;
+    Ok(())
+}
+
+async fn handle_quick_deploy(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+) -> Result<(), anyhow::Error> {
+    let quick = match &state.config.quick_deploy {
+        Some(quick) if quick.enabled => quick,
+        _ => {
+            bot.answer_callback_query(callback_id)
+                .text("Fast deploy chưa được cấu hình.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let action = match quick.action.as_str() {
+        "build" => DeployAction::BuildOnly,
+        "deploy" => DeployAction::BackupAndDeploy,
+        _ => {
+            bot.answer_callback_query(callback_id)
+                .text("quick_deploy.action không hợp lệ.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let has_target = state
+        .config
+        .deploy_targets
+        .iter()
+        .any(|dt| dt.project == quick.project && dt.environment == quick.environment);
+    if !has_target {
+        bot.answer_callback_query(callback_id)
+            .text("Fast deploy chưa có deploy target hợp lệ.")
+            .await?;
+        return Ok(());
+    }
+
+    let ctx_result = auth::authenticate(&state.config, session.owner_user_id, chat_id.0);
+    match ctx_result {
+        Ok(ctx) => {
+            if let Err(e) = check_action_permission(&ctx, action, &quick.environment, &state.config)
+            {
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Permission denied: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            bot.answer_callback_query(callback_id)
+                .text(format!("Auth error: {}", e))
+                .await?;
+            return Ok(());
+        }
+    }
+
+    session.environment_key = Some(quick.environment.clone());
+    session.project_key = Some(quick.project.clone());
+    session.branch = Some(quick.branch.clone());
+    session.action = Some(action);
+    session.set_step(SessionStep::Confirm);
+    state.session_store.update(session.clone()).await;
+
+    bot.answer_callback_query(callback_id)
+        .text("Đã chọn cấu hình fast deploy.")
+        .await?;
     show_step(session, state, bot, chat_id).await?;
     Ok(())
 }
@@ -1546,6 +1624,7 @@ mod tests {
                 keep_success_staging: false,
             },
             environments: vec![],
+            quick_deploy: None,
             repositories: vec![],
             projects: vec![],
             deploy_targets: vec![],

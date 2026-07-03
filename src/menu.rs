@@ -4,21 +4,28 @@ use teloxide::types::InlineKeyboardMarkup;
 use crate::config::Config;
 
 pub fn environment_keyboard(config: &Config) -> InlineKeyboardMarkup {
-    let mut rows: Vec<Vec<InlineKeyboardButton>> = config
-        .environments
-        .iter()
-        .map(|env| {
-            let icon = if env.requires_double_confirm {
-                "🔴"
-            } else {
-                "🟢"
-            };
-            vec![InlineKeyboardButton::callback(
-                format!("{} {}", icon, env.name),
-                format!("env:{}", env.key),
-            )]
-        })
-        .collect();
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+
+    if let Some(quick) = &config.quick_deploy {
+        if quick.enabled {
+            rows.push(vec![InlineKeyboardButton::callback(
+                "⚡ Fast deploy",
+                "quick:deploy",
+            )]);
+        }
+    }
+
+    rows.extend(config.environments.iter().map(|env| {
+        let icon = if env.requires_double_confirm {
+            "🔴"
+        } else {
+            "🟢"
+        };
+        vec![InlineKeyboardButton::callback(
+            format!("{} {}", icon, env.name),
+            format!("env:{}", env.key),
+        )]
+    }));
 
     rows.push(vec![cancel_button()]);
     InlineKeyboardMarkup::new(rows)

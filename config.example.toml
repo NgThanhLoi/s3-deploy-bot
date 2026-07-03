@@ -51,6 +51,13 @@ project_lock_timeout_minutes = 60
 keep_staging_on_failure = true
 keep_success_staging = false
 
+[quick_deploy]
+enabled = true
+project = "webpos"
+environment = "staging"
+branch = "master"
+action = "deploy" # "deploy" or "build"
+
 [[environments]]
 key = "staging"
 name = "Staging"
