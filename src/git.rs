@@ -5,6 +5,12 @@ use anyhow::{bail, Context, Result};
 
 use crate::config::{RepositoryConfig, ToolConfig};
 
+fn git_command(tools: &ToolConfig) -> Command {
+    let mut command = Command::new(&tools.git_path);
+    command.arg("-c").arg("core.longpaths=true");
+    command
+}
+
 pub fn checkout_fresh_worktree(
     tools: &ToolConfig,
     repo: &RepositoryConfig,
@@ -25,7 +31,7 @@ pub fn remove_worktree(tools: &ToolConfig, mirror_dir: &Path, worktree_dir: &Pat
         return Ok(());
     }
 
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("worktree")
@@ -66,7 +72,7 @@ fn ensure_mirror(tools: &ToolConfig, repo: &RepositoryConfig, mirror_dir: &Path)
         })?;
     }
 
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("clone")
         .arg("--mirror")
         .arg(&repo.repo_url)
@@ -87,7 +93,7 @@ fn ensure_mirror(tools: &ToolConfig, repo: &RepositoryConfig, mirror_dir: &Path)
 }
 
 fn fetch_mirror(tools: &ToolConfig, mirror_dir: &Path) -> Result<()> {
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("fetch")
@@ -109,7 +115,7 @@ fn fetch_mirror(tools: &ToolConfig, mirror_dir: &Path) -> Result<()> {
 }
 
 fn prune_stale_worktrees(tools: &ToolConfig, mirror_dir: &Path) -> Result<()> {
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("worktree")
@@ -135,7 +141,7 @@ fn prune_stale_worktrees(tools: &ToolConfig, mirror_dir: &Path) -> Result<()> {
 }
 
 fn resolve_remote_branch(tools: &ToolConfig, mirror_dir: &Path, branch: &str) -> Result<String> {
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("rev-parse")
@@ -177,7 +183,7 @@ fn add_worktree(
         })?;
     }
 
-    let output = Command::new(&tools.git_path)
+    let output = git_command(tools)
         .arg("--git-dir")
         .arg(mirror_dir)
         .arg("worktree")
@@ -204,4 +210,31 @@ fn add_worktree(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tools() -> ToolConfig {
+        ToolConfig {
+            git_path: PathBuf::from("git"),
+            msbuild_path: PathBuf::from("msbuild"),
+            robocopy_path: PathBuf::from("robocopy"),
+            appcmd_path: PathBuf::from("appcmd"),
+            seven_zip_path: PathBuf::from("7z"),
+        }
+    }
+
+    #[test]
+    fn git_command_enables_windows_long_paths() {
+        let command = git_command(&tools());
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(args, vec!["-c", "core.longpaths=true"]);
+    }
 }

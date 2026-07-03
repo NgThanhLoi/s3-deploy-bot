@@ -125,6 +125,8 @@ Manual branch input is validated against these rules:
 7. Recycle the configured app pool when enabled.
 8. Clean the job workspace on success; on failure, `keep_staging_on_failure` controls cleanup.
 
+Git commands run with `core.longpaths=true` so Windows checkouts can handle long repository paths. Windows Long Paths should still be enabled at OS level for build tools that access the same files.
+
 ## Development
 
 ### Build
