@@ -1,0 +1,43 @@
+[package]
+name = "s3-deploy-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Telegram Deploy Bot for ASP.NET WebForms on Windows Server"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+teloxide = { version = "0.12", features = ["macros", "rustls", "ctrlc_handler"], optional = true, default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+walkdir = "2"
+sanitize-filename = "0.5"
+zip = { version = "1", optional = true, default-features = false, features = ["deflate-miniz"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = { version = "0.7", optional = true }
+
+[features]
+default = ["bot", "storage", "zip-support", "windows-service-support"]
+bot = ["teloxide"]
+storage = ["rusqlite"]
+zip-support = ["dep:zip"]
+windows-service-support = ["windows-service"]
+
+[profile.release]
+opt-level = 2
+lto = true
+strip = true
+codegen-units = 1

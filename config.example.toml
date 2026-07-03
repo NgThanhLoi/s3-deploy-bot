@@ -1,0 +1,100 @@
+[app]
+name = "S3 Deploy Bot"
+timezone = "Asia/Ho_Chi_Minh"
+data_dir = "E:\\BuildAgent\\data"
+log_dir = "E:\\BuildAgent\\logs"
+
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_chat_ids = [123456789]
+
+[[users]]
+id = 123456789
+name = "Loi"
+role = "admin"
+
+[[users]]
+id = 987654321
+name = "Dev A"
+role = "developer"
+
+[roles.admin]
+can_build = true
+can_deploy_staging = true
+can_deploy_production = true
+can_rollback = true
+can_view_logs = true
+can_cancel_jobs = true
+
+[roles.developer]
+can_build = true
+can_deploy_staging = true
+can_deploy_production = false
+can_rollback = false
+can_view_logs = true
+can_cancel_jobs = false
+
+[tools]
+git_path = "git"
+msbuild_path = "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe"
+robocopy_path = "robocopy"
+seven_zip_path = "C:\\Program Files\\7-Zip\\7z.exe"
+appcmd_path = "C:\\Windows\\System32\\inetsrv\\appcmd.exe"
+
+[defaults]
+build_timeout_minutes = 30
+deploy_timeout_minutes = 15
+backup_timeout_minutes = 30
+max_log_lines_in_telegram = 80
+project_lock_timeout_minutes = 60
+keep_staging_on_failure = true
+keep_success_staging = false
+
+[[environments]]
+key = "staging"
+name = "Staging"
+requires_double_confirm = false
+
+[[environments]]
+key = "production"
+name = "Production"
+requires_double_confirm = true
+
+[[projects]]
+key = "webpos"
+name = "WebPOS"
+repo_url = "git@github.com:your-org/webpos.git"
+workspace = "E:\\BuildAgent\\repos\\webpos"
+project_file = "E:\\BuildAgent\\repos\\webpos\\WebPOS.csproj"
+configuration = "Release"
+main_branch = "master"
+quick_branches = ["master", "develop"]
+manual_branch_enabled = true
+manual_branch_patterns = ["feature/*", "bugfix/*", "hotfix/*", "release/*", "dev/*"]
+forbidden_branch_patterns = ["backup/*", "archive/*", "danger/*"]
+delete_from_staging = [
+    "web.config",
+    "ConnectionStrings.config",
+    "MBBank.json"
+]
+delete_app_global_resources = false
+
+[[deploy_targets]]
+project = "webpos"
+environment = "production"
+iis_path = "E:\\Websites\\WebPOS"
+publish_root = "E:\\BuildAgent\\publish\\webpos"
+backup_root = "E:\\BuildAgent\\backup\\webpos"
+deploy_mode = "overlay"
+use_app_offline = false
+recycle_app_pool_after_deploy = true
+app_pool_name = "WebPOS"
+preserve_files = [
+    "web.config",
+    "ConnectionStrings.config",
+    "MBBank.json"
+]
+preserve_dirs = [
+    "Images",
+    "PaymentSetting"
+]
