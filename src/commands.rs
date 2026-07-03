@@ -13,6 +13,8 @@ use crate::menu;
 use crate::runner;
 use crate::session::{DeployAction, Session, SessionStep, SessionStore};
 
+const TELEGRAM_TEXT_LIMIT: usize = 3900;
+
 #[derive(BotCommands, Clone, Debug)]
 #[command(rename_rule = "lowercase")]
 pub enum Command {
@@ -64,13 +66,13 @@ pub fn escape_md_v2(s: &str) -> String {
 /// Send a plain text message (no MarkdownV2 parsing) to avoid escaping issues.
 /// If the text contains dynamic data like paths, branches, errors, we use this.
 async fn send_plain(bot: &Bot, chat_id: ChatId, text: &str) -> Result<Message, anyhow::Error> {
-    Ok(bot.send_message(chat_id, text).await?)
+    Ok(bot.send_message(chat_id, telegram_safe_text(text)).await?)
 }
 
 /// Send a text message with MarkdownV2 parse mode.
 async fn send_md(bot: &Bot, chat_id: ChatId, text: &str) -> Result<Message, anyhow::Error> {
     Ok(bot
-        .send_message(chat_id, text)
+        .send_message(chat_id, telegram_safe_text(text))
         .parse_mode(ParseMode::MarkdownV2)
         .await?)
 }
@@ -82,7 +84,7 @@ async fn edit_plain(
     text: &str,
     reply_markup: Option<InlineKeyboardMarkup>,
 ) {
-    let mut req = bot.edit_message_text(chat_id, msg_id, text);
+    let mut req = bot.edit_message_text(chat_id, msg_id, telegram_safe_text(text));
     if let Some(kb) = reply_markup {
         req = req.reply_markup(kb);
     }
@@ -98,7 +100,7 @@ async fn edit_md(
     text: &str,
     reply_markup: Option<InlineKeyboardMarkup>,
 ) {
-    let mut req = bot.edit_message_text(chat_id, msg_id, text);
+    let mut req = bot.edit_message_text(chat_id, msg_id, telegram_safe_text(text));
     req = req.parse_mode(ParseMode::MarkdownV2);
     if let Some(kb) = reply_markup {
         req = req.reply_markup(kb);
@@ -2324,6 +2326,15 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn telegram_safe_text(value: &str) -> String {
+    let mut text = truncate_text(value, TELEGRAM_TEXT_LIMIT);
+    if text.ends_with('\\') {
+        text.pop();
+        text.push_str("...");
+    }
+    text
+}
+
 async fn edit_session_message(
     bot: &Bot,
     chat_id: ChatId,
@@ -2866,6 +2877,33 @@ mod tests {
     fn test_escape_md_v2_plain_text() {
         assert_eq!(escape_md_v2("abc123"), "abc123");
         assert_eq!(escape_md_v2(""), "");
+    }
+
+    #[test]
+    fn telegram_safe_text_truncates_long_messages() {
+        let input = "a".repeat(5000);
+        let output = telegram_safe_text(&input);
+
+        assert_eq!(output.chars().count(), TELEGRAM_TEXT_LIMIT);
+        assert!(output.ends_with("..."));
+    }
+
+    #[test]
+    fn telegram_safe_text_keeps_short_messages() {
+        let input = "short status";
+
+        assert_eq!(telegram_safe_text(input), input);
+    }
+
+    #[test]
+    fn telegram_safe_text_does_not_end_with_escape_slash() {
+        let mut input = "a".repeat(TELEGRAM_TEXT_LIMIT - 3);
+        input.push('\\');
+        input.push_str("tail");
+
+        let output = telegram_safe_text(&input);
+
+        assert!(!output.ends_with('\\'));
     }
 
     #[test]
