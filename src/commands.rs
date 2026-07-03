@@ -1647,6 +1647,29 @@ mod tests {
         assert!(result.unwrap_err().contains("Permission"));
     }
 
+    #[test]
+    fn fast_preset_keyboard_lists_presets_and_controls() {
+        let presets = vec![make_preset("webpos", "staging", "s3-retail-prod")];
+
+        let kb = menu::fast_preset_list_keyboard(&presets, true);
+        let rows = kb.inline_keyboard;
+
+        assert!(rows[0][0].text.contains("WebPOS staging"));
+        assert_eq!(rows[1][0].text, "⚙️ Cấu hình mặc định");
+        assert_eq!(rows[2][0].text, "➕ Tạo preset mới");
+        assert_eq!(rows[3][0].text, "⚙️ Quản lý preset");
+    }
+
+    #[test]
+    fn fast_preset_keyboard_manage_one_has_run_edit_delete() {
+        let kb = menu::fast_preset_manage_one_keyboard("preset-1");
+        let rows = kb.inline_keyboard;
+
+        assert_eq!(rows[0][0].text, "▶️ Chạy");
+        assert_eq!(rows[1][0].text, "✏️ Sửa");
+        assert_eq!(rows[2][0].text, "🗑 Xóa");
+    }
+
     // ---- Branch validation tests ----
 
     #[test]

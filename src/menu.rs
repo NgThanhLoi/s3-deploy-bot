@@ -2,6 +2,7 @@ use teloxide::types::InlineKeyboardButton;
 use teloxide::types::InlineKeyboardMarkup;
 
 use crate::config::Config;
+use crate::fast_preset::FastPreset;
 
 pub fn environment_keyboard(config: &Config) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -113,6 +114,108 @@ pub fn confirm_keyboard(double: bool) -> InlineKeyboardMarkup {
             InlineKeyboardButton::callback("❌ Hủy", "confirm:no"),
         ]])
     }
+}
+
+pub fn fast_preset_list_keyboard(
+    presets: &[FastPreset],
+    has_config_default: bool,
+) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = presets
+        .iter()
+        .map(|preset| {
+            vec![InlineKeyboardButton::callback(
+                format!("▶️ {}", preset.name),
+                format!("fast:run:{}", preset.id),
+            )]
+        })
+        .collect();
+
+    if has_config_default {
+        rows.push(vec![InlineKeyboardButton::callback(
+            "⚙️ Cấu hình mặc định",
+            "fast:default",
+        )]);
+    }
+
+    rows.push(vec![InlineKeyboardButton::callback(
+        "➕ Tạo preset mới",
+        "fast:create",
+    )]);
+    rows.push(vec![InlineKeyboardButton::callback(
+        "⚙️ Quản lý preset",
+        "fast:manage",
+    )]);
+    rows.push(vec![back_button(), cancel_button()]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn fast_preset_manage_keyboard(presets: &[FastPreset]) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = presets
+        .iter()
+        .map(|preset| {
+            vec![InlineKeyboardButton::callback(
+                &preset.name,
+                format!("fast:manage_one:{}", preset.id),
+            )]
+        })
+        .collect();
+
+    rows.push(vec![back_button(), cancel_button()]);
+    InlineKeyboardMarkup::new(rows)
+}
+
+pub fn fast_preset_manage_one_keyboard(preset_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "▶️ Chạy",
+            format!("fast:run:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "✏️ Sửa",
+            format!("fast:edit:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "🗑 Xóa",
+            format!("fast:delete:{}", preset_id),
+        )],
+        vec![back_button(), cancel_button()],
+    ])
+}
+
+pub fn fast_preset_edit_field_keyboard(preset_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            "✏️ Đổi tên",
+            format!("fast:edit_name:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "📦 Đổi project",
+            format!("fast:edit_project:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "🌍 Đổi environment",
+            format!("fast:edit_environment:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "🌿 Đổi branch",
+            format!("fast:edit_branch:{}", preset_id),
+        )],
+        vec![InlineKeyboardButton::callback(
+            "⚙️ Đổi action",
+            format!("fast:edit_action:{}", preset_id),
+        )],
+        vec![back_button(), cancel_button()],
+    ])
+}
+
+pub fn fast_preset_delete_confirm_keyboard(preset_id: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![
+        vec![
+            InlineKeyboardButton::callback("✅ Xóa", format!("fast:delete_yes:{}", preset_id)),
+            InlineKeyboardButton::callback("❌ Hủy", format!("fast:delete_no:{}", preset_id)),
+        ],
+        vec![back_button()],
+    ])
 }
 
 fn back_button() -> InlineKeyboardButton {
