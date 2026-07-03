@@ -21,8 +21,9 @@ pub async fn run_job(job_id: String, bot: Bot, state: AppState) -> Result<()> {
     job.stage = "starting".to_string();
     push_log(&mut job, "Job started");
     state.job_store.update(job.clone()).await;
+    update_progress_message(&bot, &job).await;
 
-    let result = run_pipeline(&mut job, &state).await;
+    let result = run_pipeline(&mut job, &bot, &state).await;
 
     match result {
         Ok(()) => {
@@ -31,17 +32,7 @@ pub async fn run_job(job_id: String, bot: Bot, state: AppState) -> Result<()> {
             job.finished_at = Some(Utc::now());
             push_log(&mut job, "Job completed successfully");
             state.job_store.update(job.clone()).await;
-            bot.send_message(
-                ChatId(job.chat_id),
-                format!(
-                    "✅ Job {} completed\nProject: {}\nEnvironment: {}\nBranch: {}",
-                    short_id(&job.job_id),
-                    job.project_key,
-                    job.environment_key,
-                    job.branch
-                ),
-            )
-            .await?;
+            update_progress_message(&bot, &job).await;
         }
         Err(e) => {
             job.status = JobStatus::Failed;
@@ -51,25 +42,14 @@ pub async fn run_job(job_id: String, bot: Bot, state: AppState) -> Result<()> {
             push_log(&mut job, "Job failed");
             cleanup_after_failure(&job, &state).await;
             state.job_store.update(job.clone()).await;
-            bot.send_message(
-                ChatId(job.chat_id),
-                format!(
-                    "❌ Job {} failed\nProject: {}\nEnvironment: {}\nBranch: {}\n\n{}",
-                    short_id(&job.job_id),
-                    job.project_key,
-                    job.environment_key,
-                    job.branch,
-                    e
-                ),
-            )
-            .await?;
+            update_progress_message(&bot, &job).await;
         }
     }
 
     Ok(())
 }
 
-async fn run_pipeline(job: &mut Job, state: &AppState) -> Result<()> {
+async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> {
     let project = state
         .config
         .projects
@@ -102,25 +82,49 @@ async fn run_pipeline(job: &mut Job, state: &AppState) -> Result<()> {
     let repo_dir = job_dir.join(format!("{}-repo", repo.key));
     let build_dir = job_dir.join(format!("{}-build", project.key));
 
-    update_stage(job, state, "prepare_workspace", "Preparing job workspace").await;
+    update_stage(
+        job,
+        bot,
+        state,
+        "prepare_workspace",
+        "Preparing job workspace",
+    )
+    .await;
     reset_dir(&job_dir)?;
 
-    update_stage(job, state, "git_clone", "Cloning repository").await;
+    update_stage(job, bot, state, "git_clone", "Cloning repository").await;
     let commit = git::clone_branch(&state.config.tools, &repo, &job.branch, &repo_dir)?;
     job.commit_hash = Some(commit.clone());
-    push_log(job, &format!("Resolved commit {}", commit));
+    push_log(job, format!("Resolved commit {}", commit));
     state.job_store.update(job.clone()).await;
-
-    update_stage(job, state, "prepare_build_dir", "Preparing build directory").await;
-    staging::clean_build_dir(&build_dir)?;
-
-    update_stage(job, state, "msbuild_publish", "Running MSBuild publish").await;
-    let build_output = msbuild::publish(&state.config.tools, &project, &repo_dir, &build_dir)?;
-    push_log(job, summarize_output("MSBuild", &build_output));
-    state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
 
     update_stage(
         job,
+        bot,
+        state,
+        "prepare_build_dir",
+        "Preparing build directory",
+    )
+    .await;
+    staging::clean_build_dir(&build_dir)?;
+
+    update_stage(
+        job,
+        bot,
+        state,
+        "msbuild_publish",
+        "Running MSBuild publish",
+    )
+    .await;
+    let build_output = msbuild::publish(&state.config.tools, &project, &repo_dir, &build_dir)?;
+    push_log(job, summarize_output("MSBuild", &build_output));
+    state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
+
+    update_stage(
+        job,
+        bot,
         state,
         "cleanup_build",
         "Deleting sensitive build output",
@@ -130,43 +134,134 @@ async fn run_pipeline(job: &mut Job, state: &AppState) -> Result<()> {
     if deleted.is_empty() {
         push_log(job, "No sensitive build entries matched");
     } else {
-        push_log(job, &format!("Deleted from build: {}", deleted.join(", ")));
+        push_log(job, format!("Deleted from build: {}", deleted.join(", ")));
     }
     state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
 
     if job.action == DeployAction::BuildOnly {
-        update_stage(job, state, "cleanup_workspace", "Cleaning job workspace").await;
+        update_stage(
+            job,
+            bot,
+            state,
+            "cleanup_workspace",
+            "Cleaning job workspace",
+        )
+        .await;
         cleanup_job_dir(&job_dir)?;
         return Ok(());
     }
 
-    update_stage(job, state, "backup_iis", "Backing up current IIS directory").await;
+    update_stage(
+        job,
+        bot,
+        state,
+        "backup_iis",
+        "Backing up current IIS directory",
+    )
+    .await;
     let backup_path = backup::backup_iis(&project, &target, &job.environment_key)?;
-    push_log(job, &format!("Backup created: {}", backup_path.display()));
+    push_log(job, format!("Backup created: {}", backup_path.display()));
     state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
 
-    update_stage(job, state, "deploy_overlay", "Copying build output to IIS").await;
+    update_stage(
+        job,
+        bot,
+        state,
+        "deploy_overlay",
+        "Copying build output to IIS",
+    )
+    .await;
     let deploy_output = deploy::copy_overlay(&state.config.tools, &build_dir, &target)?;
     push_log(job, summarize_output("robocopy", &deploy_output));
     state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
 
-    update_stage(job, state, "iis_recycle", "Recycling IIS app pool").await;
+    update_stage(job, bot, state, "iis_recycle", "Recycling IIS app pool").await;
     if let Some(output) = iis::recycle_app_pool(&state.config.tools, &target)? {
         push_log(job, summarize_output("appcmd", &output));
     } else {
         push_log(job, "IIS recycle skipped by config");
     }
     state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
 
-    update_stage(job, state, "cleanup_workspace", "Cleaning job workspace").await;
+    update_stage(
+        job,
+        bot,
+        state,
+        "cleanup_workspace",
+        "Cleaning job workspace",
+    )
+    .await;
     cleanup_job_dir(&job_dir)?;
     Ok(())
 }
 
-async fn update_stage(job: &mut Job, state: &AppState, stage: &str, message: &str) {
+async fn update_stage(job: &mut Job, bot: &Bot, state: &AppState, stage: &str, message: &str) {
     job.stage = stage.to_string();
     push_log(job, message);
     state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
+}
+
+async fn update_progress_message(bot: &Bot, job: &Job) {
+    let Some(message_id) = job.progress_message_id else {
+        return;
+    };
+
+    let text = render_progress_text(job);
+    if let Err(e) = bot
+        .edit_message_text(ChatId(job.chat_id), message_id, text)
+        .await
+    {
+        tracing::warn!(
+            "Failed to update progress message for job {}: {:?}",
+            job.job_id,
+            e
+        );
+    }
+}
+
+fn render_progress_text(job: &Job) -> String {
+    let icon = match job.status {
+        JobStatus::Queued => "⏳",
+        JobStatus::Running => "🔄",
+        JobStatus::Success => "✅",
+        JobStatus::Failed => "❌",
+        JobStatus::Cancelled => "🚫",
+    };
+
+    let mut text = format!(
+        "{} Job #{}\n\nProject: {}\nEnvironment: {}\nBranch: {}\nAction: {}\nStatus: {}\nStage: {}",
+        icon,
+        short_id(&job.job_id),
+        job.project_key,
+        job.environment_key,
+        job.branch,
+        job.action.label(),
+        job.status.label(),
+        job.stage
+    );
+
+    if let Some(commit) = &job.commit_hash {
+        text.push_str(&format!("\nCommit: {}", short_commit(commit)));
+    }
+
+    text.push_str("\n\nLog mới nhất:\n");
+    for line in job.log.iter().rev().take(8).rev() {
+        text.push_str("- ");
+        text.push_str(&compact_log_line(line));
+        text.push('\n');
+    }
+
+    if let Some(error) = &job.error {
+        text.push_str("\nLỗi:\n");
+        text.push_str(&truncate(error, 900));
+    }
+
+    truncate(&text, 3900)
 }
 
 async fn cleanup_after_failure(job: &Job, state: &AppState) {
@@ -201,16 +296,47 @@ fn cleanup_job_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn push_log(job: &mut Job, line: &str) {
-    job.log
-        .push(format!("{} {}", Utc::now().to_rfc3339(), line));
+fn push_log(job: &mut Job, line: impl AsRef<str>) {
+    job.log.push(format!(
+        "{} {}",
+        Utc::now().to_rfc3339(),
+        summarize_log_entry(line.as_ref())
+    ));
 }
 
-fn summarize_output<'a>(label: &str, output: &'a str) -> &'a str {
-    let _ = label;
-    output
+fn summarize_output(label: &str, output: &str) -> String {
+    format!("{} output:\n{}", label, tail_lines(output, 12))
+}
+
+fn summarize_log_entry(value: &str) -> String {
+    truncate(&value.replace('\r', "").replace('\n', " | "), 900)
+}
+
+fn tail_lines(value: &str, max_lines: usize) -> String {
+    let mut lines: Vec<&str> = value.lines().rev().take(max_lines).collect();
+    lines.reverse();
+    lines.join("\n")
 }
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+fn short_commit(commit: &str) -> &str {
+    commit.get(..8).unwrap_or(commit)
+}
+
+fn compact_log_line(line: &str) -> String {
+    let without_timestamp = line.split_once(' ').map(|(_, rest)| rest).unwrap_or(line);
+    truncate(without_timestamp, 180)
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut output: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    output.push_str("...");
+    output
 }

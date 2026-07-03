@@ -295,26 +295,7 @@ pub async fn handle_log(msg: Message, bot: Bot, state: AppState) -> Result<(), a
 
     let jobs = state.job_store.recent_for_chat(chat_id.0, 1).await;
     if let Some(job) = jobs.first() {
-        let mut text = format!(
-            "📋 Log job #{}\nStatus: {}\nStage: {}\n\n",
-            short_id(&job.job_id),
-            job.status.label(),
-            job.stage
-        );
-        for line in job
-            .log
-            .iter()
-            .rev()
-            .take(state.config.defaults.max_log_lines_in_telegram)
-            .rev()
-        {
-            text.push_str(line);
-            text.push('\n');
-        }
-        if let Some(error) = &job.error {
-            text.push_str("\nLỗi:\n");
-            text.push_str(error);
-        }
+        let text = render_log_message(job, state.config.defaults.max_log_lines_in_telegram);
         send_plain(&bot, chat_id, &text).await?;
     } else {
         send_plain(&bot, chat_id, "📋 Log\n\nChưa có job nào.").await?;
@@ -932,6 +913,7 @@ async fn handle_confirm(
                 let job = Job::new(
                     session.owner_user_id,
                     chat_id.0,
+                    session.message_id,
                     project_key,
                     environment_key,
                     branch,
@@ -1272,6 +1254,45 @@ fn yesno(v: bool) -> &'static str {
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+fn render_log_message(job: &Job, max_lines: usize) -> String {
+    let mut text = format!(
+        "📋 Log job #{}\nStatus: {}\nStage: {}\n\n",
+        short_id(&job.job_id),
+        job.status.label(),
+        job.stage
+    );
+
+    text.push_str("Log mới nhất:\n");
+    for line in job.log.iter().rev().take(max_lines.min(20)).rev() {
+        text.push_str("- ");
+        text.push_str(&compact_log_line(line));
+        text.push('\n');
+    }
+
+    if let Some(error) = &job.error {
+        text.push_str("\nLỗi:\n");
+        text.push_str(&truncate_text(error, 1200));
+    }
+
+    text.push_str("\n\nLog đầy đủ nằm trong file log trên server.");
+    truncate_text(&text, 3900)
+}
+
+fn compact_log_line(line: &str) -> String {
+    let without_timestamp = line.split_once(' ').map(|(_, rest)| rest).unwrap_or(line);
+    truncate_text(&without_timestamp.replace('\n', " "), 180)
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut output: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    output.push_str("...");
+    output
 }
 
 async fn edit_session_message(

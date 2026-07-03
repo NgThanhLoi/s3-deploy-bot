@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use teloxide::types::MessageId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ pub struct Job {
     pub job_id: String,
     pub requested_by: i64,
     pub chat_id: i64,
+    pub progress_message_id: Option<MessageId>,
     pub project_key: String,
     pub environment_key: String,
     pub branch: String,
@@ -52,6 +54,7 @@ impl Job {
     pub fn new(
         requested_by: i64,
         chat_id: i64,
+        progress_message_id: Option<MessageId>,
         project_key: String,
         environment_key: String,
         branch: String,
@@ -61,6 +64,7 @@ impl Job {
             job_id: Uuid::new_v4().to_string(),
             requested_by,
             chat_id,
+            progress_message_id,
             project_key,
             environment_key,
             branch,
