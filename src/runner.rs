@@ -35,6 +35,15 @@ pub async fn run_job(job_id: String, bot: Bot, state: AppState) -> Result<()> {
             update_progress_message(&bot, &job).await;
         }
         Err(e) => {
+            tracing::error!(
+                job_id = %job.job_id,
+                project = %job.project_key,
+                environment = %job.environment_key,
+                branch = %job.branch,
+                stage = %job.stage,
+                error = ?e,
+                "Deploy job failed"
+            );
             job.status = JobStatus::Failed;
             job.stage = "failed".to_string();
             job.error = Some(format!("{:#}", e));
