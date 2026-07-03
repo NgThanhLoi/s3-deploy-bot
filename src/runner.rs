@@ -381,3 +381,239 @@ fn truncate(value: &str, max_chars: usize) -> String {
     output.push_str("...");
     output
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    use crate::commands::AppState;
+    use crate::config::{
+        AppConfig, DefaultsConfig, DeployTargetConfig, EnvironmentConfig, ProjectConfig, RawConfig,
+        RepositoryConfig, RolePermissions, TelegramConfig, ToolConfig, UserConfig,
+    };
+    use crate::fast_preset::{store_path, FastPresetStore};
+    use crate::job::{Job, JobStatus, JobStore};
+    use crate::session::{DeployAction, SessionStore};
+
+    #[tokio::test]
+    async fn deploy_pipeline_fake_tools_runs_on_linux() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_repo = dir.path().join("source-repo");
+        let workspace = dir.path().join("workspace");
+        let iis_dir = dir.path().join("iis");
+        let backup_root = dir.path().join("backup");
+        let data_dir = dir.path().join("data");
+        let tools_dir = dir.path().join("tools");
+
+        create_source_repo(&source_repo);
+        std::fs::create_dir_all(&iis_dir).unwrap();
+        std::fs::write(iis_dir.join("old.txt"), "old file").unwrap();
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        let msbuild = write_executable(
+            &tools_dir.join("msbuild_fake.sh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+publish=""
+for arg in "$@"; do
+  case "$arg" in
+    /p:PublishUrl=*) publish="${arg#/p:PublishUrl=}" ;;
+  esac
+done
+if [ -z "$publish" ]; then
+  echo "missing PublishUrl" >&2
+  exit 2
+fi
+mkdir -p "$publish/PaymentSetting"
+echo "published" > "$publish/index.html"
+echo "sensitive" > "$publish/web.config"
+echo "secret" > "$publish/PaymentSetting/secret.txt"
+echo "fake msbuild published to $publish"
+"#,
+        );
+        let robocopy = write_executable(
+            &tools_dir.join("robocopy_fake.sh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+src="$1"
+dst="$2"
+mkdir -p "$dst"
+cp -a "$src"/. "$dst"/
+echo "fake robocopy copied $src to $dst"
+exit 1
+"#,
+        );
+        let appcmd = write_executable(
+            &tools_dir.join("appcmd_fake.sh"),
+            r#"#!/usr/bin/env bash
+echo "fake appcmd"
+"#,
+        );
+
+        let config = Arc::new(RawConfig {
+            app: AppConfig {
+                name: "Test Bot".to_string(),
+                timezone: "UTC".to_string(),
+                data_dir: data_dir.clone(),
+                log_dir: dir.path().join("logs"),
+                workspace_root: workspace.clone(),
+            },
+            telegram: TelegramConfig {
+                bot_token_env: "TEST_TOKEN".to_string(),
+                allowed_chat_ids: vec![100],
+            },
+            users: vec![UserConfig {
+                id: 1,
+                name: "Tester".to_string(),
+                role: "admin".to_string(),
+            }],
+            roles: HashMap::<String, RolePermissions>::new(),
+            tools: ToolConfig {
+                git_path: PathBuf::from("git"),
+                msbuild_path: msbuild,
+                robocopy_path: robocopy,
+                seven_zip_path: PathBuf::from("7z"),
+                appcmd_path: appcmd,
+            },
+            defaults: DefaultsConfig {
+                build_timeout_minutes: 30,
+                deploy_timeout_minutes: 15,
+                backup_timeout_minutes: 30,
+                max_log_lines_in_telegram: 80,
+                project_lock_timeout_minutes: 60,
+                keep_staging_on_failure: false,
+                keep_success_staging: false,
+            },
+            quick_deploy: None,
+            environments: vec![EnvironmentConfig {
+                key: "staging".to_string(),
+                name: "Staging".to_string(),
+                requires_double_confirm: false,
+            }],
+            repositories: vec![RepositoryConfig {
+                key: "s3retail".to_string(),
+                name: "S3Retail".to_string(),
+                repo_url: source_repo.to_string_lossy().into_owned(),
+                main_branch: "master".to_string(),
+                quick_branches: vec!["s3-retail-prod".to_string()],
+                manual_branch_enabled: true,
+                manual_branch_patterns: vec!["*".to_string()],
+                forbidden_branch_patterns: vec![],
+            }],
+            projects: vec![ProjectConfig {
+                key: "webpos".to_string(),
+                name: "WebPOS".to_string(),
+                repository: "s3retail".to_string(),
+                project_file: PathBuf::from("Websites/WebPOS/WebPOS.csproj"),
+                configuration: "Release".to_string(),
+                precompile_before_publish: true,
+                enable_updateable: true,
+                delete_from_build: vec!["web.config".to_string(), "PaymentSetting".to_string()],
+            }],
+            deploy_targets: vec![DeployTargetConfig {
+                project: "webpos".to_string(),
+                environment: "staging".to_string(),
+                iis_path: iis_dir.clone(),
+                backup_root: backup_root.clone(),
+                deploy_mode: "overlay".to_string(),
+                use_app_offline: false,
+                recycle_app_pool_after_deploy: false,
+                app_pool_name: None,
+                preserve_files: vec![],
+                preserve_dirs: vec![],
+            }],
+        });
+        let job_store = JobStore::new();
+        let job = Job::new(
+            1,
+            100,
+            None,
+            "webpos".to_string(),
+            "staging".to_string(),
+            "s3-retail-prod".to_string(),
+            DeployAction::BackupAndDeploy,
+        );
+        let job_id = job.job_id.clone();
+        job_store.insert(job).await;
+        let state = AppState {
+            fast_preset_store: FastPresetStore::new(store_path(&data_dir)),
+            config,
+            session_store: SessionStore::new(),
+            job_store: job_store.clone(),
+        };
+
+        run_job(job_id.clone(), Bot::new("123456:test-token"), state)
+            .await
+            .unwrap();
+
+        let completed = job_store.get(&job_id).await.unwrap();
+        assert_eq!(completed.status, JobStatus::Success);
+        assert_eq!(completed.stage, "done");
+        assert!(completed.commit_hash.is_some());
+        assert_eq!(
+            std::fs::read_to_string(iis_dir.join("index.html")).unwrap(),
+            "published\n"
+        );
+        assert!(iis_dir.join("old.txt").is_file());
+        assert!(!iis_dir.join("web.config").exists());
+        assert!(!iis_dir.join("PaymentSetting").exists());
+        assert!(workspace.join("repos/s3retail.git").is_dir());
+        assert!(!workspace.join("jobs").join(&job_id).exists());
+        assert!(backup_root.join("staging").exists());
+        assert!(has_zip_file(&backup_root));
+    }
+
+    fn create_source_repo(path: &Path) {
+        std::fs::create_dir_all(path.join("Websites/WebPOS")).unwrap();
+        run_git(path.parent().unwrap(), &["init", path.to_str().unwrap()]);
+        run_git(path, &["config", "user.name", "Test User"]);
+        run_git(path, &["config", "user.email", "test@example.com"]);
+        std::fs::write(path.join("Websites/WebPOS/WebPOS.csproj"), "<Project />").unwrap();
+        std::fs::write(path.join("README.md"), "source").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-m", "initial"]);
+        run_git(path, &["checkout", "-b", "s3-retail-prod"]);
+        std::fs::write(path.join("branch.txt"), "prod").unwrap();
+        run_git(path, &["add", "."]);
+        run_git(path, &["commit", "-m", "prod branch"]);
+    }
+
+    fn write_executable(path: &Path, content: &str) -> PathBuf {
+        std::fs::write(path, content).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+        path.to_path_buf()
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn has_zip_file(path: &Path) -> bool {
+        walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .map(|ext| ext == "zip")
+                    .unwrap_or(false)
+            })
+    }
+}

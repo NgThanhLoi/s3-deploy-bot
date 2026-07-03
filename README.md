@@ -156,6 +156,15 @@ cargo build
 cargo test
 ```
 
+Linux can run the deploy logic with fake Windows tools:
+
+```bash
+cargo test git_mirror_checkout_resolves_branch_from_heads_ref
+cargo test deploy_pipeline_fake_tools_runs_on_linux
+```
+
+These tests use a temporary real Git repository, cached mirror/worktree checkout, fake MSBuild publish, fake robocopy overlay, real zip backup, and job workspace cleanup.
+
 ### Lint
 
 ```bash

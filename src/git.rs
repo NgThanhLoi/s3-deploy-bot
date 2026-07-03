@@ -221,6 +221,7 @@ fn add_worktree(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
 
     fn tools() -> ToolConfig {
         ToolConfig {
@@ -248,6 +249,103 @@ mod tests {
         assert_eq!(
             mirror_branch_ref("s3-retail-prod"),
             "refs/heads/s3-retail-prod"
+        );
+    }
+
+    #[test]
+    fn git_mirror_checkout_resolves_branch_from_heads_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let mirror_dir = dir.path().join("mirror.git");
+        let worktree_dir = dir.path().join("worktree");
+
+        std::fs::create_dir_all(source_dir.join("Websites/WebPOS")).unwrap();
+        run_git(dir.path(), &["init", source_dir.to_str().unwrap()]);
+        run_git(&source_dir, &["config", "user.name", "Test User"]);
+        run_git(&source_dir, &["config", "user.email", "test@example.com"]);
+        std::fs::write(
+            source_dir.join("Websites/WebPOS/WebPOS.csproj"),
+            "<Project />",
+        )
+        .unwrap();
+        std::fs::write(source_dir.join("README.md"), "mirror test").unwrap();
+        run_git(&source_dir, &["add", "."]);
+        run_git(&source_dir, &["commit", "-m", "initial"]);
+        run_git(&source_dir, &["checkout", "-b", "s3-retail-prod"]);
+        std::fs::write(source_dir.join("branch.txt"), "prod").unwrap();
+        run_git(&source_dir, &["add", "."]);
+        run_git(&source_dir, &["commit", "-m", "prod branch"]);
+
+        let repo = RepositoryConfig {
+            key: "s3retail".to_string(),
+            name: "S3Retail".to_string(),
+            repo_url: source_dir.to_string_lossy().into_owned(),
+            main_branch: "master".to_string(),
+            quick_branches: vec!["s3-retail-prod".to_string()],
+            manual_branch_enabled: true,
+            manual_branch_patterns: vec!["*".to_string()],
+            forbidden_branch_patterns: vec![],
+        };
+
+        let commit = checkout_fresh_worktree(
+            &tools(),
+            &repo,
+            "s3-retail-prod",
+            &mirror_dir,
+            &worktree_dir,
+        )
+        .unwrap();
+
+        assert_eq!(commit.len(), 40);
+        assert!(worktree_dir.join("branch.txt").is_file());
+        assert_git_ref_exists(&mirror_dir, "refs/heads/s3-retail-prod");
+        assert_git_ref_missing(&mirror_dir, "refs/remotes/origin/s3-retail-prod");
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_git_ref_exists(git_dir: &std::path::Path, reference: &str) {
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(git_dir)
+            .arg("rev-parse")
+            .arg(reference)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "expected ref {} to exist\nstdout:\n{}\nstderr:\n{}",
+            reference,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_git_ref_missing(git_dir: &std::path::Path, reference: &str) {
+        let output = Command::new("git")
+            .arg("--git-dir")
+            .arg(git_dir)
+            .arg("rev-parse")
+            .arg(reference)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "expected ref {} to be missing",
+            reference
         );
     }
 }
