@@ -15,6 +15,12 @@ pub enum SessionStep {
     SelectAction,
     Confirm,
     DoubleConfirm,
+    FastPresetList,
+    FastPresetManageList,
+    FastPresetManageOne,
+    FastPresetCreateName,
+    FastPresetEditField,
+    FastPresetDeleteConfirm,
     Done,
 }
 
@@ -55,6 +61,9 @@ pub struct Session {
     pub branch: Option<String>,
     pub commit_hash: Option<String>,
     pub action: Option<DeployAction>,
+    pub fast_preset_id: Option<String>,
+    pub fast_preset_name: Option<String>,
+    pub fast_preset_editing: bool,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -73,6 +82,9 @@ impl Session {
             branch: None,
             commit_hash: None,
             action: None,
+            fast_preset_id: None,
+            fast_preset_name: None,
+            fast_preset_editing: false,
             created_at: now,
             expires_at: now + Duration::minutes(10),
         }

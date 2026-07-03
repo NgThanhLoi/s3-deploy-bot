@@ -7,6 +7,7 @@ use teloxide::utils::command::BotCommands as _;
 
 use crate::auth::{self, AuthContext, Permission};
 use crate::config::Config;
+use crate::fast_preset::{FastPreset, FastPresetAction};
 use crate::job::{Job, JobStore};
 use crate::menu;
 use crate::runner;
@@ -611,6 +612,66 @@ fn check_action_permission(
     }
 }
 
+fn validate_preset_for_user(
+    ctx: &AuthContext,
+    config: &Config,
+    preset: &FastPreset,
+) -> Result<DeployAction, String> {
+    let action = match preset.action {
+        FastPresetAction::Build => DeployAction::BuildOnly,
+        FastPresetAction::Deploy => DeployAction::BackupAndDeploy,
+    };
+
+    let project = config
+        .projects
+        .iter()
+        .find(|project| project.key == preset.project)
+        .ok_or_else(|| format!("Project '{}' not found.", preset.project))?;
+
+    if !config
+        .environments
+        .iter()
+        .any(|environment| environment.key == preset.environment)
+    {
+        return Err(format!("Environment '{}' not found.", preset.environment));
+    }
+
+    if !config
+        .deploy_targets
+        .iter()
+        .any(|target| target.project == preset.project && target.environment == preset.environment)
+    {
+        return Err(format!(
+            "Preset '{}' has no deploy target for project '{}' environment '{}'.",
+            preset.name, preset.project, preset.environment
+        ));
+    }
+
+    let repo = config
+        .repositories
+        .iter()
+        .find(|repo| repo.key == project.repository)
+        .ok_or_else(|| format!("Repository '{}' not found.", project.repository))?;
+
+    let quick_branch =
+        preset.branch == repo.main_branch || repo.quick_branches.iter().any(|b| b == &preset.branch);
+    if !quick_branch {
+        if !repo.manual_branch_enabled {
+            return Err(format!(
+                "Branch '{}' is not configured for repository '{}'.",
+                preset.branch, repo.key
+            ));
+        }
+        validate_manual_branch(&preset.branch, Some(repo))
+            .map_err(|e| format!("Branch '{}' is invalid: {}", preset.branch, e))?;
+    }
+
+    check_action_permission(ctx, action, &preset.environment, config)
+        .map_err(|e| format!("Permission denied: {}", e))?;
+
+    Ok(action)
+}
+
 // ---------------------------------------------------------------------------
 // Step handlers
 // ---------------------------------------------------------------------------
@@ -1154,6 +1215,15 @@ fn build_step_content(session: &Session, state: &AppState) -> (String, InlineKey
             let keyboard = menu::confirm_keyboard(true);
             (text, keyboard)
         }
+        SessionStep::FastPresetList
+        | SessionStep::FastPresetManageList
+        | SessionStep::FastPresetManageOne
+        | SessionStep::FastPresetCreateName
+        | SessionStep::FastPresetEditField
+        | SessionStep::FastPresetDeleteConfirm => {
+            let text = "⚡ *Fast Deploy*\n\nTính năng đang chuẩn bị\\.".to_string();
+            (text, InlineKeyboardMarkup::default())
+        }
         SessionStep::Done => {
             let text =
                 "✅ *Job đã được tạo*\n\nDùng /status hoặc /log để xem tiến trình\\.".to_string();
@@ -1291,6 +1361,12 @@ fn previous_step(current: SessionStep) -> SessionStep {
         SessionStep::SelectAction => SessionStep::SelectBranch,
         SessionStep::Confirm => SessionStep::SelectAction,
         SessionStep::DoubleConfirm => SessionStep::Confirm,
+        SessionStep::FastPresetList => SessionStep::SelectEnvironment,
+        SessionStep::FastPresetManageList => SessionStep::FastPresetList,
+        SessionStep::FastPresetManageOne => SessionStep::FastPresetManageList,
+        SessionStep::FastPresetCreateName => SessionStep::FastPresetList,
+        SessionStep::FastPresetEditField => SessionStep::FastPresetManageOne,
+        SessionStep::FastPresetDeleteConfirm => SessionStep::FastPresetManageOne,
         SessionStep::Done => SessionStep::Done,
     }
 }
@@ -1407,6 +1483,7 @@ async fn authenticate_or_reply(state: &AppState, bot: Bot, msg: &Message) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_preset::{FastPreset, FastPresetAction};
     use crate::config::RepositoryConfig;
     use crate::menu;
     use std::path::PathBuf;
@@ -1427,6 +1504,147 @@ mod tests {
             manual_branch_patterns: patterns.iter().map(|s| s.to_string()).collect(),
             forbidden_branch_patterns: forbidden.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    fn make_preset(project: &str, environment: &str, branch: &str) -> FastPreset {
+        FastPreset {
+            id: "preset-1".to_string(),
+            owner_user_id: 1,
+            name: "WebPOS staging".to_string(),
+            project: project.to_string(),
+            environment: environment.to_string(),
+            branch: branch.to_string(),
+            action: FastPresetAction::Deploy,
+        }
+    }
+
+    fn make_auth_context(can_deploy_staging: bool) -> AuthContext {
+        AuthContext {
+            user: crate::config::UserConfig {
+                id: 1,
+                name: "Test".to_string(),
+                role: "tester".to_string(),
+            },
+            permissions: crate::config::RolePermissions {
+                can_build: true,
+                can_deploy_staging,
+                can_deploy_production: false,
+                can_rollback: false,
+                can_view_logs: true,
+                can_cancel_jobs: false,
+            },
+            chat_id: 100,
+        }
+    }
+
+    fn make_preset_config(with_target: bool) -> crate::config::RawConfig {
+        let deploy_targets = if with_target {
+            vec![crate::config::DeployTargetConfig {
+                project: "webpos".to_string(),
+                environment: "staging".to_string(),
+                iis_path: PathBuf::from("D:/wwwroot/WebPOS"),
+                backup_root: PathBuf::from("D:/backups"),
+                deploy_mode: "overlay".to_string(),
+                use_app_offline: false,
+                recycle_app_pool_after_deploy: false,
+                app_pool_name: None,
+                preserve_files: vec![],
+                preserve_dirs: vec![],
+            }]
+        } else {
+            vec![]
+        };
+
+        crate::config::RawConfig {
+            app: crate::config::AppConfig {
+                name: "Test".to_string(),
+                timezone: "UTC".to_string(),
+                data_dir: PathBuf::from("/tmp/data"),
+                log_dir: PathBuf::from("/tmp/logs"),
+                workspace_root: PathBuf::from("/tmp/workspace"),
+            },
+            telegram: crate::config::TelegramConfig {
+                bot_token_env: "TEST_TOKEN".to_string(),
+                allowed_chat_ids: vec![100],
+            },
+            users: vec![],
+            roles: std::collections::HashMap::new(),
+            tools: crate::config::ToolConfig {
+                git_path: PathBuf::from("git"),
+                msbuild_path: PathBuf::from("msbuild"),
+                robocopy_path: PathBuf::from("robocopy"),
+                seven_zip_path: PathBuf::from("7z"),
+                appcmd_path: PathBuf::from("appcmd"),
+            },
+            defaults: crate::config::DefaultsConfig {
+                build_timeout_minutes: 30,
+                deploy_timeout_minutes: 15,
+                backup_timeout_minutes: 30,
+                max_log_lines_in_telegram: 80,
+                project_lock_timeout_minutes: 60,
+                keep_staging_on_failure: true,
+                keep_success_staging: false,
+            },
+            environments: vec![crate::config::EnvironmentConfig {
+                key: "staging".to_string(),
+                name: "Staging".to_string(),
+                requires_double_confirm: false,
+            }],
+            quick_deploy: None,
+            repositories: vec![make_repository(
+                "master",
+                vec!["s3-retail-prod"],
+                vec!["feature/*"],
+                vec!["backup/*"],
+            )],
+            projects: vec![crate::config::ProjectConfig {
+                key: "webpos".to_string(),
+                name: "WebPOS".to_string(),
+                repository: "test".to_string(),
+                project_file: PathBuf::from("Websites/WebPOS/WebPOS.csproj"),
+                configuration: "Release".to_string(),
+                precompile_before_publish: true,
+                enable_updateable: true,
+                delete_from_build: vec![],
+            }],
+            deploy_targets,
+        }
+    }
+
+    #[test]
+    fn fast_preset_validation_rejects_missing_deploy_target() {
+        let config = make_preset_config(false);
+        let ctx = make_auth_context(true);
+        let preset = make_preset("webpos", "staging", "s3-retail-prod");
+
+        let result = validate_preset_for_user(&ctx, &config, &preset);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deploy target"));
+    }
+
+    #[test]
+    fn fast_preset_validation_rejects_invalid_branch() {
+        let config = make_preset_config(true);
+        let ctx = make_auth_context(true);
+        let preset = make_preset("webpos", "staging", "backup/test");
+
+        let result = validate_preset_for_user(&ctx, &config, &preset);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Branch"));
+    }
+
+    #[test]
+    fn fast_preset_validation_rejects_missing_permission() {
+        let config = make_preset_config(true);
+        let ctx = make_auth_context(false);
+        let preset = make_preset("webpos", "staging", "s3-retail-prod");
+
+        let result = validate_preset_for_user(&ctx, &config, &preset);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Permission"));
     }
 
     // ---- Branch validation tests ----
