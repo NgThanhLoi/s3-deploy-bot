@@ -6,6 +6,7 @@ mod bot;
 mod commands;
 mod config;
 mod deploy;
+mod fast_preset;
 mod git;
 mod iis;
 mod job;

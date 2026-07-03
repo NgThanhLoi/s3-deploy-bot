@@ -1384,6 +1384,7 @@ dependencies = [
  "rusqlite",
  "sanitize-filename",
  "serde",
+ "serde_json",
  "teloxide",
  "tempfile",
  "thiserror 1.0.69",

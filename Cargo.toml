@@ -8,6 +8,7 @@ description = "Telegram Deploy Bot for ASP.NET WebForms on Windows Server"
 tokio = { version = "1", features = ["full"] }
 teloxide = { version = "0.12", features = ["macros", "rustls", "ctrlc_handler"], optional = true, default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 thiserror = "1"
