@@ -5,6 +5,7 @@ use teloxide::prelude::*;
 
 use crate::commands::{self, AppState, Command};
 use crate::config::Config;
+use crate::fast_preset::{store_path, FastPresetStore};
 use crate::job::JobStore;
 use crate::session::SessionStore;
 
@@ -13,6 +14,7 @@ pub async fn run_bot(config: Arc<Config>) -> anyhow::Result<()> {
     let bot = Bot::new(token);
 
     let state = AppState {
+        fast_preset_store: FastPresetStore::new(store_path(&config.app.data_dir)),
         config,
         session_store: SessionStore::new(),
         job_store: JobStore::new(),
@@ -63,6 +65,7 @@ async fn handle_command(
         Command::Start => commands::handle_start(msg, bot, state).await,
         Command::Whoami => commands::handle_whoami(msg, bot, state).await,
         Command::Deploy => commands::handle_deploy(msg, bot, state).await,
+        Command::Fast => commands::handle_fast(msg, bot, state).await,
         Command::Status => commands::handle_status(msg, bot, state).await,
         Command::Log => commands::handle_log(msg, bot, state).await,
         Command::Cancel => commands::handle_cancel(msg, bot, state).await,

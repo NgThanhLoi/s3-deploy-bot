@@ -16,6 +16,15 @@ pub enum FastPresetAction {
     Deploy,
 }
 
+impl FastPresetAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FastPresetAction::Build => "build",
+            FastPresetAction::Deploy => "deploy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FastPreset {
     pub id: String,
@@ -223,8 +232,7 @@ fn ensure_non_empty(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn store_path(data_dir: &Path) -> PathBuf {
+pub fn store_path(data_dir: &Path) -> PathBuf {
     data_dir.join("fast_deploy_presets.json")
 }
 
@@ -247,8 +255,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FastPresetStore::new(dir.path().join("fast_deploy_presets.json"));
 
-        store.create(1, new_preset("WebPOS staging", "")).await.unwrap();
-        store.create(2, new_preset("Other", "-other")).await.unwrap();
+        store
+            .create(1, new_preset("WebPOS staging", ""))
+            .await
+            .unwrap();
+        store
+            .create(2, new_preset("Other", "-other"))
+            .await
+            .unwrap();
 
         let mine = store.list_for_owner(1).await.unwrap();
 

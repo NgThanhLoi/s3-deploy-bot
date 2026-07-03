@@ -7,14 +7,10 @@ use crate::fast_preset::FastPreset;
 pub fn environment_keyboard(config: &Config) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
-    if let Some(quick) = &config.quick_deploy {
-        if quick.enabled {
-            rows.push(vec![InlineKeyboardButton::callback(
-                "⚡ Fast deploy",
-                "quick:deploy",
-            )]);
-        }
-    }
+    rows.push(vec![InlineKeyboardButton::callback(
+        "⚡ Fast deploy",
+        "quick:deploy",
+    )]);
 
     rows.extend(config.environments.iter().map(|env| {
         let icon = if env.requires_double_confirm {

@@ -7,7 +7,7 @@ use teloxide::utils::command::BotCommands as _;
 
 use crate::auth::{self, AuthContext, Permission};
 use crate::config::Config;
-use crate::fast_preset::{FastPreset, FastPresetAction};
+use crate::fast_preset::{FastPreset, FastPresetAction, FastPresetStore, NewFastPreset};
 use crate::job::{Job, JobStore};
 use crate::menu;
 use crate::runner;
@@ -22,6 +22,8 @@ pub enum Command {
     Whoami,
     #[command(description = "Start a new deploy (wizard)")]
     Deploy,
+    #[command(description = "Open Fast Deploy presets")]
+    Fast,
     #[command(description = "Show deploy status")]
     Status,
     #[command(description = "View deploy logs")]
@@ -33,6 +35,7 @@ pub enum Command {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
+    pub fast_preset_store: FastPresetStore,
     pub session_store: SessionStore,
     pub job_store: JobStore,
 }
@@ -238,6 +241,46 @@ pub async fn handle_deploy(msg: Message, bot: Bot, state: AppState) -> Result<()
     Ok(())
 }
 
+pub async fn handle_fast(msg: Message, bot: Bot, state: AppState) -> Result<(), anyhow::Error> {
+    let chat_id = msg.chat.id;
+
+    let ctx = match authenticate_or_reply(&state, bot.clone(), &msg).await {
+        Some(ctx) => ctx,
+        None => return Ok(()),
+    };
+
+    if let Err(e) = auth::require_permission(&ctx, Permission::Build) {
+        send_plain(&bot, chat_id, &format!("❌ {}", e)).await?;
+        return Ok(());
+    }
+
+    if let Some(_existing) = state.session_store.find_active_for_chat(chat_id.0).await {
+        send_plain(
+            &bot,
+            chat_id,
+            "⚠️ Bạn đang có một phiên deploy chưa kết thúc.\n\
+             Dùng /cancel để hủy phiên cũ rồi chạy /fast lại.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut session = state.session_store.create(ctx.user.id, chat_id.0).await;
+    session.set_step(SessionStep::FastPresetList);
+
+    let (text, keyboard) = build_fast_preset_list_content(&session, &state).await?;
+    let sent = bot
+        .send_message(chat_id, text)
+        .parse_mode(ParseMode::MarkdownV2)
+        .reply_markup(keyboard)
+        .await?;
+
+    session.message_id = Some(sent.id);
+    state.session_store.update(session).await;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // /status
 // ---------------------------------------------------------------------------
@@ -392,20 +435,62 @@ pub async fn handle_callback(
             session.set_step(prev);
             state.session_store.update(session.clone()).await;
             bot.answer_callback_query(callback_id).await?;
-            show_step(&session, &state, &bot, chat_id).await?;
+            match prev {
+                SessionStep::FastPresetList => {
+                    let (text, keyboard) = build_fast_preset_list_content(&session, &state).await?;
+                    edit_session_message(&bot, chat_id, session.message_id, &text, Some(keyboard))
+                        .await;
+                }
+                SessionStep::FastPresetManageList => {
+                    show_fast_preset_manage_list_without_answer(
+                        &mut session,
+                        &state,
+                        &bot,
+                        chat_id,
+                    )
+                    .await?;
+                }
+                SessionStep::FastPresetManageOne => {
+                    if let Some(preset_id) = session.fast_preset_id.clone() {
+                        show_fast_preset_manage_one_without_answer(
+                            &mut session,
+                            &state,
+                            &bot,
+                            chat_id,
+                            &preset_id,
+                        )
+                        .await?;
+                    } else {
+                        show_fast_preset_manage_list_without_answer(
+                            &mut session,
+                            &state,
+                            &bot,
+                            chat_id,
+                        )
+                        .await?;
+                    }
+                }
+                _ => show_step(&session, &state, &bot, chat_id).await?,
+            }
             return Ok(());
         }
         _ => {}
     }
 
+    if data == "quick:deploy" {
+        show_fast_preset_list(&mut session, &state, &bot, chat_id, &callback_id).await?;
+        return Ok(());
+    }
+
+    if data.starts_with("fast:") {
+        handle_fast_preset_callback(&mut session, &state, &bot, chat_id, &callback_id, &data)
+            .await?;
+        return Ok(());
+    }
+
     match session.step {
         SessionStep::SelectEnvironment => {
-            if data == "quick:deploy" {
-                handle_quick_deploy(&mut session, &state, &bot, chat_id, &callback_id).await?
-            } else {
-                handle_env_selected(&mut session, &state, &bot, chat_id, &callback_id, &data)
-                    .await?
-            }
+            handle_env_selected(&mut session, &state, &bot, chat_id, &callback_id, &data).await?
         }
         SessionStep::SelectProject => {
             handle_project_selected(&mut session, &state, &bot, chat_id, &callback_id, &data)
@@ -459,6 +544,48 @@ pub async fn handle_text_message(
         None => return Ok(()), // No active session, ignore message
     };
 
+    if session.step == SessionStep::FastPresetCreateName {
+        let name = raw_text.trim();
+        if name.is_empty() {
+            send_plain(&bot, chat_id, "❌ Tên preset không được rỗng.").await?;
+            return Ok(());
+        }
+
+        session.fast_preset_name = Some(name.to_string());
+        if session.fast_preset_editing {
+            let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0) {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    send_plain(&bot, chat_id, &format!("❌ Auth error: {}", e)).await?;
+                    return Ok(());
+                }
+            };
+            match update_current_preset(&session, &state, &ctx).await {
+                Ok(preset) => {
+                    session.set_step(SessionStep::FastPresetManageOne);
+                    state.session_store.update(session.clone()).await;
+                    edit_session_message(
+                        &bot,
+                        chat_id,
+                        session.message_id,
+                        &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                        Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    send_plain(&bot, chat_id, &format!("❌ Preset không hợp lệ: {}", e)).await?;
+                }
+            }
+            return Ok(());
+        }
+
+        session.set_step(SessionStep::SelectEnvironment);
+        state.session_store.update(session.clone()).await;
+        show_step(&session, &state, &bot, chat_id).await?;
+        return Ok(());
+    }
+
     if session.step != SessionStep::WaitingManualBranch {
         return Ok(()); // Not waiting for input
     }
@@ -468,6 +595,35 @@ pub async fn handle_text_message(
     match validate_manual_branch(raw_text, repo) {
         Ok(branch) => {
             session.branch = Some(branch);
+            if session.fast_preset_editing {
+                let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0)
+                {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        send_plain(&bot, chat_id, &format!("❌ Auth error: {}", e)).await?;
+                        return Ok(());
+                    }
+                };
+                match update_current_preset(&session, &state, &ctx).await {
+                    Ok(preset) => {
+                        session.set_step(SessionStep::FastPresetManageOne);
+                        state.session_store.update(session.clone()).await;
+                        edit_session_message(
+                            &bot,
+                            chat_id,
+                            session.message_id,
+                            &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                            Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        send_plain(&bot, chat_id, &format!("❌ Preset không hợp lệ: {}", e))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
             session.set_step(SessionStep::SelectAction);
             state.session_store.update(session.clone()).await;
 
@@ -653,8 +809,8 @@ fn validate_preset_for_user(
         .find(|repo| repo.key == project.repository)
         .ok_or_else(|| format!("Repository '{}' not found.", project.repository))?;
 
-    let quick_branch =
-        preset.branch == repo.main_branch || repo.quick_branches.iter().any(|b| b == &preset.branch);
+    let quick_branch = preset.branch == repo.main_branch
+        || repo.quick_branches.iter().any(|b| b == &preset.branch);
     if !quick_branch {
         if !repo.manual_branch_enabled {
             return Err(format!(
@@ -670,6 +826,573 @@ fn validate_preset_for_user(
         .map_err(|e| format!("Permission denied: {}", e))?;
 
     Ok(action)
+}
+
+async fn build_fast_preset_list_content(
+    session: &Session,
+    state: &AppState,
+) -> Result<(String, InlineKeyboardMarkup), anyhow::Error> {
+    let presets = state
+        .fast_preset_store
+        .list_for_owner(session.owner_user_id)
+        .await?;
+    let has_config_default = state
+        .config
+        .quick_deploy
+        .as_ref()
+        .map(|quick| quick.enabled)
+        .unwrap_or(false);
+    let text = if presets.is_empty() && !has_config_default {
+        "⚡ *Fast Deploy*\n\nChưa có preset nào\\. Bấm *Tạo preset mới* để lưu luồng deploy nhanh\\."
+            .to_string()
+    } else {
+        "⚡ *Fast Deploy*\n\nChọn preset để chạy nhanh, hoặc tạo preset mới\\.".to_string()
+    };
+    Ok((
+        text,
+        menu::fast_preset_list_keyboard(&presets, has_config_default),
+    ))
+}
+
+async fn show_fast_preset_list(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+) -> Result<(), anyhow::Error> {
+    session.set_step(SessionStep::FastPresetList);
+    state.session_store.update(session.clone()).await;
+    let (text, keyboard) = build_fast_preset_list_content(session, state).await?;
+    bot.answer_callback_query(callback_id).await?;
+    edit_session_message(bot, chat_id, session.message_id, &text, Some(keyboard)).await;
+    Ok(())
+}
+
+async fn handle_fast_preset_callback(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    data: &str,
+) -> Result<(), anyhow::Error> {
+    match data {
+        "fast:create" => {
+            session.fast_preset_id = None;
+            session.fast_preset_name = None;
+            session.fast_preset_editing = false;
+            session.environment_key = None;
+            session.project_key = None;
+            session.branch = None;
+            session.action = None;
+            session.set_step(SessionStep::FastPresetCreateName);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            edit_session_message(
+                bot,
+                chat_id,
+                session.message_id,
+                "➕ *Tạo Fast Deploy preset*\n\nGửi tên preset bằng tin nhắn text\\. Ví dụ: `WebPOS staging`",
+                None,
+            )
+            .await;
+        }
+        "fast:manage" => {
+            show_fast_preset_manage_list(session, state, bot, chat_id, callback_id).await?;
+        }
+        "fast:default" => {
+            run_config_default_preset(session, state, bot, chat_id, callback_id).await?;
+        }
+        _ if data.starts_with("fast:run:") => {
+            let preset_id = data.trim_start_matches("fast:run:");
+            run_saved_preset(session, state, bot, chat_id, callback_id, preset_id).await?;
+        }
+        _ if data.starts_with("fast:manage_one:") => {
+            let preset_id = data.trim_start_matches("fast:manage_one:");
+            show_fast_preset_manage_one(session, state, bot, chat_id, callback_id, preset_id)
+                .await?;
+        }
+        _ if data.starts_with("fast:edit:") => {
+            let preset_id = data.trim_start_matches("fast:edit:");
+            show_fast_preset_edit_fields(session, state, bot, chat_id, callback_id, preset_id)
+                .await?;
+        }
+        _ if data.starts_with("fast:delete:") => {
+            let preset_id = data.trim_start_matches("fast:delete:");
+            show_fast_preset_delete_confirm(session, state, bot, chat_id, callback_id, preset_id)
+                .await?;
+        }
+        _ if data.starts_with("fast:delete_yes:") => {
+            let preset_id = data.trim_start_matches("fast:delete_yes:");
+            let deleted = state
+                .fast_preset_store
+                .delete(session.owner_user_id, preset_id)
+                .await?;
+            let text = if deleted {
+                "Đã xóa preset."
+            } else {
+                "Không tìm thấy preset."
+            };
+            bot.answer_callback_query(callback_id).text(text).await?;
+            show_fast_preset_manage_list_without_answer(session, state, bot, chat_id).await?;
+        }
+        _ if data.starts_with("fast:delete_no:") => {
+            let preset_id = data.trim_start_matches("fast:delete_no:");
+            show_fast_preset_manage_one(session, state, bot, chat_id, callback_id, preset_id)
+                .await?;
+        }
+        _ if data.starts_with("fast:edit_name:") => {
+            let preset_id = data.trim_start_matches("fast:edit_name:");
+            load_preset_for_edit(session, state, preset_id).await?;
+            session.set_step(SessionStep::FastPresetCreateName);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            edit_session_message(
+                bot,
+                chat_id,
+                session.message_id,
+                "✏️ *Đổi tên preset*\n\nGửi tên mới bằng tin nhắn text\\.",
+                None,
+            )
+            .await;
+        }
+        _ if data.starts_with("fast:edit_environment:") => {
+            let preset_id = data.trim_start_matches("fast:edit_environment:");
+            load_preset_for_edit(session, state, preset_id).await?;
+            session.set_step(SessionStep::SelectEnvironment);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            show_step(session, state, bot, chat_id).await?;
+        }
+        _ if data.starts_with("fast:edit_project:") => {
+            let preset_id = data.trim_start_matches("fast:edit_project:");
+            load_preset_for_edit(session, state, preset_id).await?;
+            session.set_step(SessionStep::SelectProject);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            show_step(session, state, bot, chat_id).await?;
+        }
+        _ if data.starts_with("fast:edit_branch:") => {
+            let preset_id = data.trim_start_matches("fast:edit_branch:");
+            load_preset_for_edit(session, state, preset_id).await?;
+            session.set_step(SessionStep::SelectBranch);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            show_step(session, state, bot, chat_id).await?;
+        }
+        _ if data.starts_with("fast:edit_action:") => {
+            let preset_id = data.trim_start_matches("fast:edit_action:");
+            load_preset_for_edit(session, state, preset_id).await?;
+            session.set_step(SessionStep::SelectAction);
+            state.session_store.update(session.clone()).await;
+            bot.answer_callback_query(callback_id).await?;
+            show_step(session, state, bot, chat_id).await?;
+        }
+        _ => {
+            bot.answer_callback_query(callback_id)
+                .text("Fast Deploy action không hợp lệ.")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn show_fast_preset_manage_list(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+) -> Result<(), anyhow::Error> {
+    bot.answer_callback_query(callback_id).await?;
+    show_fast_preset_manage_list_without_answer(session, state, bot, chat_id).await
+}
+
+async fn show_fast_preset_manage_list_without_answer(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+) -> Result<(), anyhow::Error> {
+    session.set_step(SessionStep::FastPresetManageList);
+    state.session_store.update(session.clone()).await;
+    let presets = state
+        .fast_preset_store
+        .list_for_owner(session.owner_user_id)
+        .await?;
+    let text = if presets.is_empty() {
+        "⚙️ *Quản lý Fast Deploy*\n\nBạn chưa có preset nào\\.".to_string()
+    } else {
+        "⚙️ *Quản lý Fast Deploy*\n\nChọn preset để chạy, sửa hoặc xóa\\.".to_string()
+    };
+    edit_session_message(
+        bot,
+        chat_id,
+        session.message_id,
+        &text,
+        Some(menu::fast_preset_manage_keyboard(&presets)),
+    )
+    .await;
+    Ok(())
+}
+
+async fn show_fast_preset_manage_one(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    preset_id: &str,
+) -> Result<(), anyhow::Error> {
+    bot.answer_callback_query(callback_id).await?;
+    show_fast_preset_manage_one_without_answer(session, state, bot, chat_id, preset_id).await
+}
+
+async fn show_fast_preset_manage_one_without_answer(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    preset_id: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(preset) = state
+        .fast_preset_store
+        .get_for_owner(session.owner_user_id, preset_id)
+        .await?
+    else {
+        edit_session_message(
+            bot,
+            chat_id,
+            session.message_id,
+            "⚠️ Không tìm thấy preset\\.",
+            Some(menu::fast_preset_manage_keyboard(&[])),
+        )
+        .await;
+        return Ok(());
+    };
+
+    session.fast_preset_id = Some(preset.id.clone());
+    session.set_step(SessionStep::FastPresetManageOne);
+    state.session_store.update(session.clone()).await;
+    edit_session_message(
+        bot,
+        chat_id,
+        session.message_id,
+        &render_fast_preset_detail("⚙️ *Fast Deploy preset*", &preset),
+        Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+    )
+    .await;
+    Ok(())
+}
+
+async fn show_fast_preset_edit_fields(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    preset_id: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(preset) = load_preset_for_edit(session, state, preset_id).await? else {
+        bot.answer_callback_query(callback_id)
+            .text("Không tìm thấy preset.")
+            .await?;
+        return Ok(());
+    };
+    session.set_step(SessionStep::FastPresetEditField);
+    state.session_store.update(session.clone()).await;
+    bot.answer_callback_query(callback_id).await?;
+    edit_session_message(
+        bot,
+        chat_id,
+        session.message_id,
+        &render_fast_preset_detail("✏️ *Sửa Fast Deploy preset*", &preset),
+        Some(menu::fast_preset_edit_field_keyboard(&preset.id)),
+    )
+    .await;
+    Ok(())
+}
+
+async fn show_fast_preset_delete_confirm(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    preset_id: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(preset) = state
+        .fast_preset_store
+        .get_for_owner(session.owner_user_id, preset_id)
+        .await?
+    else {
+        bot.answer_callback_query(callback_id)
+            .text("Không tìm thấy preset.")
+            .await?;
+        return Ok(());
+    };
+
+    session.fast_preset_id = Some(preset.id.clone());
+    session.set_step(SessionStep::FastPresetDeleteConfirm);
+    state.session_store.update(session.clone()).await;
+    bot.answer_callback_query(callback_id).await?;
+    let text = format!(
+        "🗑 *Xóa preset?*\n\nBạn muốn xóa preset `{}`?",
+        escape_md_v2(&preset.name)
+    );
+    edit_session_message(
+        bot,
+        chat_id,
+        session.message_id,
+        &text,
+        Some(menu::fast_preset_delete_confirm_keyboard(&preset.id)),
+    )
+    .await;
+    Ok(())
+}
+
+async fn run_saved_preset(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    preset_id: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(preset) = state
+        .fast_preset_store
+        .get_for_owner(session.owner_user_id, preset_id)
+        .await?
+    else {
+        bot.answer_callback_query(callback_id)
+            .text("Không tìm thấy preset.")
+            .await?;
+        return Ok(());
+    };
+
+    run_preset(session, state, bot, chat_id, callback_id, &preset).await
+}
+
+async fn run_config_default_preset(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+) -> Result<(), anyhow::Error> {
+    let Some(quick) = &state.config.quick_deploy else {
+        bot.answer_callback_query(callback_id)
+            .text("Không có cấu hình mặc định.")
+            .await?;
+        return Ok(());
+    };
+    if !quick.enabled {
+        bot.answer_callback_query(callback_id)
+            .text("Cấu hình mặc định đang tắt.")
+            .await?;
+        return Ok(());
+    }
+
+    let action = match quick.action.as_str() {
+        "build" => FastPresetAction::Build,
+        "deploy" => FastPresetAction::Deploy,
+        _ => {
+            bot.answer_callback_query(callback_id)
+                .text("quick_deploy.action không hợp lệ.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let preset = FastPreset {
+        id: "config-default".to_string(),
+        owner_user_id: session.owner_user_id,
+        name: "Cấu hình mặc định".to_string(),
+        project: quick.project.clone(),
+        environment: quick.environment.clone(),
+        branch: quick.branch.clone(),
+        action,
+    };
+
+    run_preset(session, state, bot, chat_id, callback_id, &preset).await
+}
+
+async fn run_preset(
+    session: &mut Session,
+    state: &AppState,
+    bot: &Bot,
+    chat_id: ChatId,
+    callback_id: &str,
+    preset: &FastPreset,
+) -> Result<(), anyhow::Error> {
+    let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            bot.answer_callback_query(callback_id)
+                .text(format!("Auth error: {}", e))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let action = match validate_preset_for_user(&ctx, &state.config, preset) {
+        Ok(action) => action,
+        Err(e) => {
+            bot.answer_callback_query(callback_id)
+                .text(format!("Preset không hợp lệ: {}", e))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    load_preset_into_session(session, preset, action);
+    session.fast_preset_editing = false;
+    session.set_step(SessionStep::Confirm);
+    state.session_store.update(session.clone()).await;
+    bot.answer_callback_query(callback_id)
+        .text("Đã chọn Fast Deploy preset.")
+        .await?;
+    show_step(session, state, bot, chat_id).await?;
+    Ok(())
+}
+
+async fn load_preset_for_edit(
+    session: &mut Session,
+    state: &AppState,
+    preset_id: &str,
+) -> Result<Option<FastPreset>, anyhow::Error> {
+    let preset = state
+        .fast_preset_store
+        .get_for_owner(session.owner_user_id, preset_id)
+        .await?;
+    if let Some(preset) = &preset {
+        let action = preset_action_to_deploy(preset.action);
+        load_preset_into_session(session, preset, action);
+        session.fast_preset_id = Some(preset.id.clone());
+        session.fast_preset_name = Some(preset.name.clone());
+        session.fast_preset_editing = true;
+    }
+    Ok(preset)
+}
+
+fn load_preset_into_session(session: &mut Session, preset: &FastPreset, action: DeployAction) {
+    session.environment_key = Some(preset.environment.clone());
+    session.project_key = Some(preset.project.clone());
+    session.branch = Some(preset.branch.clone());
+    session.action = Some(action);
+}
+
+fn preset_action_to_deploy(action: FastPresetAction) -> DeployAction {
+    match action {
+        FastPresetAction::Build => DeployAction::BuildOnly,
+        FastPresetAction::Deploy => DeployAction::BackupAndDeploy,
+    }
+}
+
+fn deploy_action_to_preset(action: DeployAction) -> FastPresetAction {
+    match action {
+        DeployAction::BuildOnly => FastPresetAction::Build,
+        DeployAction::BackupAndDeploy => FastPresetAction::Deploy,
+    }
+}
+
+fn preset_to_new(preset: &FastPreset) -> NewFastPreset {
+    NewFastPreset {
+        name: preset.name.clone(),
+        project: preset.project.clone(),
+        environment: preset.environment.clone(),
+        branch: preset.branch.clone(),
+        action: preset.action,
+    }
+}
+
+fn session_to_new_preset(session: &Session) -> Result<NewFastPreset, String> {
+    Ok(NewFastPreset {
+        name: session
+            .fast_preset_name
+            .clone()
+            .ok_or_else(|| "Missing preset name.".to_string())?,
+        project: session
+            .project_key
+            .clone()
+            .ok_or_else(|| "Missing preset project.".to_string())?,
+        environment: session
+            .environment_key
+            .clone()
+            .ok_or_else(|| "Missing preset environment.".to_string())?,
+        branch: session
+            .branch
+            .clone()
+            .ok_or_else(|| "Missing preset branch.".to_string())?,
+        action: deploy_action_to_preset(
+            session
+                .action
+                .ok_or_else(|| "Missing preset action.".to_string())?,
+        ),
+    })
+}
+
+async fn save_created_preset(
+    session: &Session,
+    state: &AppState,
+    ctx: &AuthContext,
+) -> Result<FastPreset, String> {
+    let input = session_to_new_preset(session)?;
+    let candidate = FastPreset {
+        id: "new".to_string(),
+        owner_user_id: session.owner_user_id,
+        name: input.name.clone(),
+        project: input.project.clone(),
+        environment: input.environment.clone(),
+        branch: input.branch.clone(),
+        action: input.action,
+    };
+    validate_preset_for_user(ctx, &state.config, &candidate)?;
+    state
+        .fast_preset_store
+        .create(session.owner_user_id, input)
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+async fn update_current_preset(
+    session: &Session,
+    state: &AppState,
+    ctx: &AuthContext,
+) -> Result<FastPreset, String> {
+    let preset_id = session
+        .fast_preset_id
+        .as_deref()
+        .ok_or_else(|| "Missing preset id.".to_string())?;
+    let input = session_to_new_preset(session)?;
+    let candidate = FastPreset {
+        id: preset_id.to_string(),
+        owner_user_id: session.owner_user_id,
+        name: input.name.clone(),
+        project: input.project.clone(),
+        environment: input.environment.clone(),
+        branch: input.branch.clone(),
+        action: input.action,
+    };
+    validate_preset_for_user(ctx, &state.config, &candidate)?;
+    state
+        .fast_preset_store
+        .update(session.owner_user_id, preset_id, input)
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+fn render_fast_preset_detail(title: &str, preset: &FastPreset) -> String {
+    format!(
+        "{}\n\nTên: `{}`\nProject: `{}`\nEnvironment: `{}`\nBranch: `{}`\nAction: `{}`",
+        title,
+        escape_md_v2(&preset.name),
+        escape_md_v2(&preset.project),
+        escape_md_v2(&preset.environment),
+        escape_md_v2(&preset.branch),
+        preset.action.label()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +1423,42 @@ async fn handle_env_selected(
     }
 
     session.environment_key = Some(env_key.to_string());
+    if session.fast_preset_editing {
+        let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Auth error: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        };
+        match update_current_preset(session, state, &ctx).await {
+            Ok(preset) => {
+                session.set_step(SessionStep::FastPresetManageOne);
+                state.session_store.update(session.clone()).await;
+                bot.answer_callback_query(callback_id)
+                    .text("Đã cập nhật preset.")
+                    .await?;
+                edit_session_message(
+                    bot,
+                    chat_id,
+                    session.message_id,
+                    &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                    Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                )
+                .await;
+                return Ok(());
+            }
+            Err(e) => {
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Preset không hợp lệ: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
+
     session.set_step(SessionStep::SelectProject);
     state.session_store.update(session.clone()).await;
 
@@ -827,6 +1586,42 @@ async fn handle_project_selected(
     }
 
     session.project_key = Some(proj_key.to_string());
+    if session.fast_preset_editing {
+        let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Auth error: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        };
+        match update_current_preset(session, state, &ctx).await {
+            Ok(preset) => {
+                session.set_step(SessionStep::FastPresetManageOne);
+                state.session_store.update(session.clone()).await;
+                bot.answer_callback_query(callback_id)
+                    .text("Đã cập nhật preset.")
+                    .await?;
+                edit_session_message(
+                    bot,
+                    chat_id,
+                    session.message_id,
+                    &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                    Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                )
+                .await;
+                return Ok(());
+            }
+            Err(e) => {
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Preset không hợp lệ: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
+
     session.set_step(SessionStep::SelectBranch);
     state.session_store.update(session.clone()).await;
 
@@ -902,6 +1697,43 @@ async fn handle_branch_selected(
             }
 
             session.branch = Some(branch.to_string());
+            if session.fast_preset_editing {
+                let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0)
+                {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        bot.answer_callback_query(callback_id)
+                            .text(format!("Auth error: {}", e))
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                match update_current_preset(session, state, &ctx).await {
+                    Ok(preset) => {
+                        session.set_step(SessionStep::FastPresetManageOne);
+                        state.session_store.update(session.clone()).await;
+                        bot.answer_callback_query(callback_id)
+                            .text("Đã cập nhật preset.")
+                            .await?;
+                        edit_session_message(
+                            bot,
+                            chat_id,
+                            session.message_id,
+                            &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                            Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        bot.answer_callback_query(callback_id)
+                            .text(format!("Preset không hợp lệ: {}", e))
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+
             session.set_step(SessionStep::SelectAction);
             state.session_store.update(session.clone()).await;
 
@@ -952,17 +1784,8 @@ async fn handle_action_selected(
 
     // Check permission before proceeding to confirm
     // We need to get auth context for the session owner
-    let ctx_result = auth::authenticate(&state.config, session.owner_user_id, chat_id.0);
-    match ctx_result {
-        Ok(ctx) => {
-            if let Err(e) = check_action_permission(&ctx, action, env_key, &state.config) {
-                session.action = saved_action; // restore
-                bot.answer_callback_query(callback_id)
-                    .text(format!("Permission denied: {}", e))
-                    .await?;
-                return Ok(());
-            }
-        }
+    let ctx = match auth::authenticate(&state.config, session.owner_user_id, chat_id.0) {
+        Ok(ctx) => ctx,
         Err(e) => {
             session.action = saved_action; // restore
             bot.answer_callback_query(callback_id)
@@ -970,9 +1793,61 @@ async fn handle_action_selected(
                 .await?;
             return Ok(());
         }
+    };
+
+    if let Err(e) = check_action_permission(&ctx, action, env_key, &state.config) {
+        session.action = saved_action; // restore
+        bot.answer_callback_query(callback_id)
+            .text(format!("Permission denied: {}", e))
+            .await?;
+        return Ok(());
     }
 
     session.set_step(SessionStep::Confirm);
+    if session.fast_preset_editing {
+        match update_current_preset(session, state, &ctx).await {
+            Ok(preset) => {
+                session.set_step(SessionStep::FastPresetManageOne);
+                state.session_store.update(session.clone()).await;
+                bot.answer_callback_query(callback_id)
+                    .text("Đã cập nhật preset.")
+                    .await?;
+                edit_session_message(
+                    bot,
+                    chat_id,
+                    session.message_id,
+                    &render_fast_preset_detail("✅ *Đã cập nhật preset*", &preset),
+                    Some(menu::fast_preset_manage_one_keyboard(&preset.id)),
+                )
+                .await;
+                return Ok(());
+            }
+            Err(e) => {
+                session.action = saved_action;
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Preset không hợp lệ: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    if session.fast_preset_name.is_some() && session.fast_preset_id.is_none() {
+        match save_created_preset(session, state, &ctx).await {
+            Ok(preset) => {
+                session.fast_preset_id = Some(preset.id);
+                session.fast_preset_editing = false;
+            }
+            Err(e) => {
+                session.action = saved_action;
+                bot.answer_callback_query(callback_id)
+                    .text(format!("Không lưu được preset: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        }
+    }
+
     state.session_store.update(session.clone()).await;
 
     bot.answer_callback_query(callback_id).await?;
@@ -1483,8 +2358,8 @@ async fn authenticate_or_reply(state: &AppState, bot: Bot, msg: &Message) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fast_preset::{FastPreset, FastPresetAction};
     use crate::config::RepositoryConfig;
+    use crate::fast_preset::{FastPreset, FastPresetAction};
     use crate::menu;
     use std::path::PathBuf;
 
