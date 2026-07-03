@@ -45,9 +45,15 @@ pub struct RolePermissions {
 pub struct ToolConfig {
     pub git_path: PathBuf,
     pub msbuild_path: PathBuf,
+    #[serde(default = "default_nuget_path")]
+    pub nuget_path: PathBuf,
     pub robocopy_path: PathBuf,
     pub seven_zip_path: PathBuf,
     pub appcmd_path: PathBuf,
+}
+
+fn default_nuget_path() -> PathBuf {
+    PathBuf::from("nuget")
 }
 
 #[derive(Debug, Clone, Deserialize)]

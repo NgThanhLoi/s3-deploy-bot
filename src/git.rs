@@ -227,6 +227,7 @@ mod tests {
         ToolConfig {
             git_path: PathBuf::from("git"),
             msbuild_path: PathBuf::from("msbuild"),
+            nuget_path: PathBuf::from("nuget"),
             robocopy_path: PathBuf::from("robocopy"),
             appcmd_path: PathBuf::from("appcmd"),
             seven_zip_path: PathBuf::from("7z"),

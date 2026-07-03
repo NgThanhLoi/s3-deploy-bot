@@ -132,6 +132,12 @@ async fn run_pipeline(job: &mut Job, bot: &Bot, state: &AppState) -> Result<()> 
     .await;
     staging::clean_build_dir(&build_dir)?;
 
+    update_stage(job, bot, state, "nuget_restore", "Restoring NuGet packages").await;
+    let restore_output = msbuild::restore(&state.config.tools, &project, &repo_dir)?;
+    push_log(job, summarize_output("NuGet restore", &restore_output));
+    state.job_store.update(job.clone()).await;
+    update_progress_message(bot, job).await;
+
     update_stage(
         job,
         bot,
@@ -452,6 +458,21 @@ exit 1
 echo "fake appcmd"
 "#,
         );
+        let nuget = write_executable(
+            &tools_dir.join("nuget_fake.sh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" != "restore" ]; then
+  echo "expected restore command" >&2
+  exit 2
+fi
+if [ ! -f "$2" ]; then
+  echo "project file does not exist: $2" >&2
+  exit 3
+fi
+echo "fake nuget restored $2"
+"#,
+        );
 
         let config = Arc::new(RawConfig {
             app: AppConfig {
@@ -474,6 +495,7 @@ echo "fake appcmd"
             tools: ToolConfig {
                 git_path: PathBuf::from("git"),
                 msbuild_path: msbuild,
+                nuget_path: nuget,
                 robocopy_path: robocopy,
                 seven_zip_path: PathBuf::from("7z"),
                 appcmd_path: appcmd,

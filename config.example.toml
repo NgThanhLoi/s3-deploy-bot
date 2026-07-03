@@ -38,6 +38,7 @@ can_cancel_jobs = false
 [tools]
 git_path = "git"
 msbuild_path = "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe"
+nuget_path = "C:\\Tools\\nuget.exe"
 robocopy_path = "robocopy"
 seven_zip_path = "C:\\Program Files\\7-Zip\\7z.exe"
 appcmd_path = "C:\\Windows\\System32\\inetsrv\\appcmd.exe"

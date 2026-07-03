@@ -70,7 +70,7 @@ Alternatively, send `/whoami` to see your current user info and permissions.
 [telegram]               # Bot token env var, allowed chat IDs
 [[users]]                # User definitions (id, name, role)
 [roles.*]                # Permission sets per role
-[tools]                  # Paths to git, msbuild, robocopy, 7z, appcmd
+[tools]                  # Paths to git, nuget, msbuild, robocopy, 7z, appcmd
 [defaults]               # Timeouts, limits
 [quick_deploy]           # Optional default Fast Deploy fallback
 [[environments]]         # Environment definitions (key, name, double_confirm)
@@ -133,12 +133,13 @@ Manual branch input is validated against these rules:
 
 1. Keep a persistent bare mirror cache under `workspace_root/repos/{repo-key}.git`.
 2. Fetch `origin` before each job and create a fresh detached worktree under `workspace_root/jobs/{job_id}/{repo-key}-worktree`.
-3. Publish the selected project with MSBuild into `{project-key}-build`.
-4. Delete configured `delete_from_build` entries from the build output.
-5. For deploy actions, zip the current IIS directory to `backup_root/{environment}/yyyy-MM-dd/{project}-HH-MM-SS.zip`.
-6. Copy build output to IIS with `robocopy /E` overlay mode. Robocopy exit codes `0..=7` are treated as success.
-7. Recycle the configured app pool when enabled.
-8. Clean the job workspace on success; on failure, `keep_staging_on_failure` controls cleanup.
+3. Restore NuGet packages with `nuget restore <project.csproj> -NonInteractive`.
+4. Publish the selected project with MSBuild into `{project-key}-build`.
+5. Delete configured `delete_from_build` entries from the build output.
+6. For deploy actions, zip the current IIS directory to `backup_root/{environment}/yyyy-MM-dd/{project}-HH-MM-SS.zip`.
+7. Copy build output to IIS with `robocopy /E` overlay mode. Robocopy exit codes `0..=7` are treated as success.
+8. Recycle the configured app pool when enabled.
+9. Clean the job workspace on success; on failure, `keep_staging_on_failure` controls cleanup.
 
 Git commands run with `core.longpaths=true` so Windows checkouts can handle long repository paths. Windows Long Paths should still be enabled at OS level for build tools that access the same files.
 
@@ -163,7 +164,7 @@ cargo test git_mirror_checkout_resolves_branch_from_heads_ref
 cargo test deploy_pipeline_fake_tools_runs_on_linux
 ```
 
-These tests use a temporary real Git repository, cached mirror/worktree checkout, fake MSBuild publish, fake robocopy overlay, real zip backup, and job workspace cleanup.
+These tests use a temporary real Git repository, cached mirror/worktree checkout, fake NuGet restore, fake MSBuild publish, fake robocopy overlay, real zip backup, and job workspace cleanup.
 
 ### Lint
 
