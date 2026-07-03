@@ -38,6 +38,6 @@ windows-service-support = ["windows-service"]
 
 [profile.release]
 opt-level = 2
-lto = true
+lto = "thin"
 strip = true
-codegen-units = 1
+codegen-units = 8
